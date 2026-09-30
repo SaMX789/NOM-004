@@ -12,8 +12,8 @@ export default function Navbar() {
             <div className="w-12 h-12 bg-[#002060] text-white flex items-center justify-center font-bold text-xs rounded-md">
               LOGO
             </div>
-            <span className="font-extrabold text-2xl text-[#002060] tracking-tight">
-              ASCI NORMA 0004
+            <span className="font-extrabold text-3xl text-[#002060] tracking-tight">
+              ASCI NORMA 004
             </span>
           </div>
 
@@ -22,10 +22,13 @@ export default function Navbar() {
             <Link to="/" className="hover:text-[#002060] transition-colors">
               Inicio
             </Link>
-            <Link to="/instrucciones" className="hover:text-[#002060] transition-colors">
-              Datos empresariales
+            <Link to="/sobre-nom004" className="hover:text-[#002060] transition-colors">
+              Sobre la NOM-004
             </Link>
             <Link to="/formulario" className="hover:text-[#002060] transition-colors">
+              Datos empresariales
+            </Link>
+            <Link to="/analisis-datos" className="hover:text-[#002060] transition-colors">
               Análisis de Riesgo de Maquinaria
             </Link>
           </div>
