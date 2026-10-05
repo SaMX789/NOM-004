@@ -6,8 +6,8 @@ import Landing from './pages/Landing';
 import About004 from './pages/About004';
 import Formulario from './pages/Formulario';
 import Analisisdatos from './pages/Analisisdatos';
+import MisEquipos from './pages/MisEquipos'; // 👈 1. Importar la nueva página
 
-// Componente auxiliar para restablecer el scroll
 function ScrollToTop() {
   const { pathname } = useLocation();
 
@@ -30,6 +30,7 @@ export default function App() {
             <Route path="/sobre-nom004" element={<About004 />} />
             <Route path="/formulario" element={<Formulario />} />
             <Route path="/analisis-datos" element={<Analisisdatos />} />
+            <Route path="/mis-equipos" element={<MisEquipos />} /> {/* 👈 2. Nueva ruta */}
           </Routes>
         </main>
         <Footer />

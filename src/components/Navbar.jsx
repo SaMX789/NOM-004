@@ -19,17 +19,20 @@ export default function Navbar() {
 
           {/* Enlaces de Navegación */}
           <div className="hidden md:flex gap-8 font-semibold text-gray-600">
-            <Link to="/" className="hover:text-[#002060] transition-colors">
+            <Link to="/" className="hover:text-blue-400 transition-colors">
               Inicio
             </Link>
-            <Link to="/sobre-nom004" className="hover:text-[#002060] transition-colors">
+            <Link to="/sobre-nom004" className="hover:text-blue-400 transition-colors">
               Sobre la NOM-004
             </Link>
-            <Link to="/formulario" className="hover:text-[#002060] transition-colors">
+            <Link to="/formulario" className="hover:text-blue-400 transition-colors">
               Datos empresariales
             </Link>
-            <Link to="/analisis-datos" className="hover:text-[#002060] transition-colors">
+            <Link to="/analisis-datos" className="hover:text-blue-400 transition-colors">
               Análisis de Riesgo de Maquinaria
+            </Link>
+            <Link to="/mis-equipos" className="hover:text-blue-400">
+              Mis Equipos
             </Link>
           </div>
 

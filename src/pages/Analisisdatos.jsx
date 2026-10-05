@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
-import { analizarEquipoConIA, generarDocumentoWord } from '../services/n8nService';
+import { useState, useEffect } from 'react';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
+import { analizarEquipoConIA } from '../services/n8nService';
 import { comprimirImagen } from '../utils/imageCompressor';
 import { subirArchivoSupabase } from '../services/storageService';
-import { guardarBorradorLocal, cargarBorradorLocal } from '../services/dbService';
+import { dbService } from '../services/dbService';
 import { getDeviceId } from '../utils/deviceId';
 
 const RIESGOS_BASE = [
@@ -18,9 +18,11 @@ const RIESGOS_BASE = [
 ];
 
 export default function Analisisdatos() {
+  const location = useLocation();
   const navigate = useNavigate();
 
   const [equipoData, setEquipoData] = useState({
+    id: null,
     equipo: '',
     identificacion: '',
     departamento: '',
@@ -31,7 +33,7 @@ export default function Analisisdatos() {
     descripcion_manual: '',
     archivo_adjunto: null,
     archivo_nombre: '',
-    manual_url: '' // URL en Supabase
+    manual_url: ''
   });
 
   const [riesgosState, setRiesgosState] = useState(
@@ -42,37 +44,51 @@ export default function Analisisdatos() {
   );
 
   const [matrizState, setMatrizState] = useState([]);
-  const [imagenesCargadas, setImagenesCargadas] = useState([]); // Guarda { id, file, preview, url }
-  const [equiposGuardados, setEquiposGuardados] = useState([]);
-
+  const [imagenesCargadas, setImagenesCargadas] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
-
-  const [elements, setElements] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-  const editorRef = useRef(null);
 
   const showToast = (message, type = 'success') => {
     setToast({ show: true, message, type });
     setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 4000);
   };
 
-  // Cargar borrador guardado en IndexedDB al entrar a la página
+  // Cargar datos cuando se accede para editar desde "Mis Equipos"
   useEffect(() => {
-    async function initIndexedDB() {
-      try {
-        const borradores = await cargarBorradorLocal();
-        if (borradores && borradores.length > 0) {
-          setEquiposGuardados(borradores);
-          showToast(`Borrador recuperado: ${borradores.length} equipo(s) en memoria`, 'success');
-        }
-      } catch (err) {
-        console.error("Error al cargar borrador local:", err);
+    if (location.state?.equipoEditar) {
+      const eq = location.state.equipoEditar;
+      
+      setEquipoData({
+        id: eq.id,
+        equipo: eq.equipo || '',
+        identificacion: eq.identificacion || '',
+        departamento: eq.departamento || '',
+        operadores: eq.operadores || '',
+        horas: eq.horas || '',
+        dias: eq.dias || [],
+        turnos: eq.turnos || [],
+        descripcion_manual: eq.descripcion_manual || eq.descripcion || '',
+        archivo_adjunto: null,
+        archivo_nombre: eq.archivo_nombre || '',
+        manual_url: eq.manual_url || ''
+      });
+
+      if (eq.riesgos) setRiesgosState(eq.riesgos);
+      if (eq.matriz) setMatrizState(eq.matriz);
+
+      if (eq.imagenes_urls && Array.isArray(eq.imagenes_urls)) {
+        setImagenesCargadas(eq.imagenes_urls.map((url, index) => ({
+          id: `img_loaded_${index}`,
+          name: `Imagen ${index + 1}`,
+          file: null,
+          preview: url,
+          url: url
+        })));
       }
+
+      showToast(`Equipo "${eq.equipo}" cargado para edición`, 'success');
     }
-    initIndexedDB();
-  }, []);
+  }, [location.state]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -117,7 +133,6 @@ export default function Analisisdatos() {
     });
   };
 
-  // Carga de PDF
   const handleArchivoChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -125,13 +140,12 @@ export default function Analisisdatos() {
         ...prev,
         archivo_adjunto: file,
         archivo_nombre: file.name,
-        manual_url: '' // Se obtendrá al presionar Analizar
+        manual_url: ''
       }));
       showToast(`Manual "${file.name}" seleccionado`, 'success');
     }
   };
 
-  // Carga y compresión automática de imágenes
   const handleImagenesChange = async (e) => {
     const files = Array.from(e.target.files);
     showToast("Comprimiendo imágenes...", "success");
@@ -151,11 +165,6 @@ export default function Analisisdatos() {
         };
 
         setImagenesCargadas(prev => [...prev, newImgObj]);
-
-        setElements(prev => [
-          ...prev,
-          { id, type: 'image', src: previewUrl, x: 20, y: 20, width: 180, height: 130 }
-        ]);
       } catch (error) {
         showToast(`Error comprimiendo ${file.name}: ${error.message}`, 'error');
       }
@@ -164,116 +173,11 @@ export default function Analisisdatos() {
 
   const removeImagen = (id) => {
     setImagenesCargadas(prev => prev.filter(img => img.id !== id));
-    setElements(prev => prev.filter(el => el.id !== id));
   };
 
-  // --- ANALIZAR CON IA USANDO SUPABASE STORAGE ---
-  const handleAnalizarConIA = async () => {
-    if (!equipoData.equipo.trim()) {
-      showToast('Por favor ingrese el nombre del equipo antes de analizar', 'error');
-      return;
-    }
-
-    setIsAnalyzing(true);
-
-    try {
-      let manualPublicUrl = equipoData.manual_url;
-
-      // 1. Subir PDF a Supabase si no se ha subido
-      if (equipoData.archivo_adjunto && !manualPublicUrl) {
-        showToast('Subiendo manual PDF a la nube...', 'success');
-        manualPublicUrl = await subirArchivoSupabase(equipoData.archivo_adjunto, 'manuales');
-        setEquipoData(prev => ({ ...prev, manual_url: manualPublicUrl }));
-      }
-
-      // 2. Subir imágenes de evidencia a Supabase
-      const imagenesConUrls = await Promise.all(
-        imagenesCargadas.map(async (img) => {
-          if (img.url) return img.url;
-          const url = await subirArchivoSupabase(img.file, 'imagenes');
-          img.url = url;
-          return url;
-        })
-      );
-
-      // 3. Enviar payload ultra ligero a n8n con URLs
-      const payload = {
-        device_id: getDeviceId(),
-        equipo: equipoData.equipo,
-        identificacion: equipoData.identificacion,
-        departamento: equipoData.departamento,
-        operadores: equipoData.operadores,
-        horas: equipoData.horas,
-        dias: equipoData.dias,
-        turnos: equipoData.turnos,
-        descripcion_manual: equipoData.descripcion_manual,
-        nombre_manual: equipoData.archivo_nombre,
-        manual_url: manualPublicUrl || null,
-        imagenes_urls: imagenesConUrls
-      };
-
-      const response = await analizarEquipoConIA(payload);
-
-      if (response?.descripcion) {
-        setEquipoData(prev => ({ ...prev, descripcion_manual: response.descripcion }));
-      }
-
-      if (response?.riesgos) {
-        setRiesgosState(prev => {
-          const updated = { ...prev };
-          Object.keys(response.riesgos).forEach(key => {
-            if (updated[key]) {
-              const rIA = response.riesgos[key];
-              updated[key] = {
-                presente: rIA.presente === true,
-                ausente: rIA.presente === false,
-                observacion: rIA.observacion || (rIA.presente === false ? 'No aplica' : '')
-              };
-            }
-          });
-          return updated;
-        });
-      }
-
-      if (response?.matriz && Array.isArray(response.matriz)) {
-        setMatrizState(response.matriz);
-      }
-
-      showToast('Análisis técnico completado con exito', 'success');
-    } catch (error) {
-      showToast('Error en el proceso: ' + error.message, 'error');
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  // Guardar en IndexedDB localmente ("+ Nuevo Equipo")
-  const handleNuevoEquipo = async () => {
-    if (!equipoData.equipo.trim()) {
-      showToast('No hay datos para guardar', 'error');
-      return;
-    }
-
-    const equipoAInsertar = {
-      id: Date.now(),
-      fecha: new Date().toLocaleString(),
-      ...equipoData,
-      archivo_adjunto: null, // No guardamos el archivo binario pesado en local
-      riesgos: riesgosState,
-      matriz: matrizState,
-      imagenes_urls: imagenesCargadas.map(i => i.url)
-    };
-
-    const nuevaLista = [...equiposGuardados, equipoAInsertar];
-    setEquiposGuardados(nuevaLista);
-
-    // Persistir en IndexedDB
-    await guardarBorradorLocal(nuevaLista);
-
-    showToast(`Equipo "${equipoData.equipo}" guardado en borrador local.`, 'success');
-
-    // Limpiar vista
+  const handleLimpiarFormulario = () => {
     setEquipoData({
+      id: null,
       equipo: '',
       identificacion: '',
       departamento: '',
@@ -296,68 +200,105 @@ export default function Analisisdatos() {
 
     setMatrizState([]);
     setImagenesCargadas([]);
-    setElements([]);
+    showToast('Formulario listo para un nuevo equipo', 'success');
   };
 
-  // Generar el archivo Word consolidado enviando solo URLs a n8n
-  const handleGenerarDocumento = async () => {
-    let listaFinalEquipos = [...equiposGuardados];
-
-    if (equipoData.equipo.trim()) {
-      const equipoActual = {
-        id: Date.now(),
-        fecha: new Date().toLocaleString(),
-        ...equipoData,
-        archivo_adjunto: null,
-        riesgos: riesgosState,
-        matriz: matrizState,
-        imagenes_urls: imagenesCargadas.map(i => i.url)
-      };
-      listaFinalEquipos.push(equipoActual);
-    }
-
-    if (listaFinalEquipos.length === 0) {
-      showToast('No hay equipos capturados.', 'error');
+  // --- ANALIZAR CON IA Y GUARDAR AUTOMÁTICAMENTE EN MIS EQUIPOS ---
+  const handleAnalizarConIA = async () => {
+    if (!equipoData.equipo.trim()) {
+      showToast('Por favor ingrese el nombre del equipo antes de analizar', 'error');
       return;
     }
 
-    setIsGenerating(true);
+    setIsAnalyzing(true);
 
     try {
-      const datosEmpresaRaw = localStorage.getItem('programa_seguridad_todos_datos');
-      const datosEmpresa = datosEmpresaRaw ? JSON.parse(datosEmpresaRaw) : {};
-      const logoEmpresa = localStorage.getItem('company_logo') || null;
+      let manualPublicUrl = equipoData.manual_url;
 
-      const payloadConsolidado = {
+      if (equipoData.archivo_adjunto && !manualPublicUrl) {
+        showToast('Subiendo manual PDF a la nube...', 'success');
+        manualPublicUrl = await subirArchivoSupabase(equipoData.archivo_adjunto, 'manuales');
+      }
+
+      const imagenesConUrls = await Promise.all(
+        imagenesCargadas.map(async (img) => {
+          if (img.url) return img.url;
+          const url = await subirArchivoSupabase(img.file, 'imagenes');
+          img.url = url;
+          return url;
+        })
+      );
+
+      const payload = {
         device_id: getDeviceId(),
-        empresa: datosEmpresa.company_name || '',
-        direccion: datosEmpresa.company_address || '',
-        rfc: datosEmpresa.company_rfc || '',
-        actividad: datosEmpresa.company_activity || '',
-        total_trabajadores: datosEmpresa.total_workers || '',
-        horarios: datosEmpresa.work_schedule || '',
-        especialista: datosEmpresa.specialist_name || '',
-        registro_stps: datosEmpresa.stps_register || '',
-        logo: logoEmpresa,
-        equipos: listaFinalEquipos
+        equipo: equipoData.equipo,
+        identificacion: equipoData.identificacion,
+        departamento: equipoData.departamento,
+        operadores: equipoData.operadores,
+        horas: equipoData.horas,
+        dias: equipoData.dias,
+        turnos: equipoData.turnos,
+        descripcion_manual: equipoData.descripcion_manual,
+        nombre_manual: equipoData.archivo_nombre,
+        manual_url: manualPublicUrl || null,
+        imagenes_urls: imagenesConUrls
       };
 
-      const blob = await generarDocumentoWord(payloadConsolidado);
+      const response = await analizarEquipoConIA(payload);
 
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `Programa_Seguridad_Maquinaria_NOM004.doc`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      // Calcular estados actualizados
+      const nuevaDescripcion = response?.descripcion || equipoData.descripcion_manual;
+      
+      let nuevosRiesgos = { ...riesgosState };
+      if (response?.riesgos) {
+        Object.keys(response.riesgos).forEach(key => {
+          if (nuevosRiesgos[key]) {
+            const rIA = response.riesgos[key];
+            nuevosRiesgos[key] = {
+              presente: rIA.presente === true,
+              ausente: rIA.presente === false,
+              observacion: rIA.observacion || (rIA.presente === false ? 'No aplica' : '')
+            };
+          }
+        });
+      }
 
-      showToast('Documento Word generado correctamente', 'success');
+      const nuevaMatriz = response?.matriz || matrizState;
+
+      // Actualizar interfaz
+      setEquipoData(prev => ({
+        ...prev,
+        descripcion_manual: nuevaDescripcion,
+        manual_url: manualPublicUrl
+      }));
+      setRiesgosState(nuevosRiesgos);
+      setMatrizState(nuevaMatriz);
+
+      // AUTO-GUARDADO EN INDEXEDDB (MIS EQUIPOS)
+      const idDefinitivo = equipoData.id || `eq_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const equipoAutoGuardado = {
+        id: idDefinitivo,
+        device_id: getDeviceId(),
+        fecha: new Date().toLocaleString(),
+        ...equipoData,
+        id: idDefinitivo,
+        descripcion_manual: nuevaDescripcion,
+        manual_url: manualPublicUrl,
+        archivo_adjunto: null,
+        riesgos: nuevosRiesgos,
+        matriz: nuevaMatriz,
+        imagenes_urls: imagenesConUrls
+      };
+
+      await dbService.guardarEquipo(equipoAutoGuardado);
+      setEquipoData(prev => ({ ...prev, id: idDefinitivo }));
+
+      showToast('Análisis técnico completado y guardado en Mis Equipos', 'success');
     } catch (error) {
-      showToast('Error al generar el archivo: ' + error.message, 'error');
+      showToast('Error en el proceso: ' + error.message, 'error');
     } finally {
-      setIsGenerating(false);
+      setIsAnalyzing(false);
     }
   };
 
@@ -376,21 +317,25 @@ export default function Analisisdatos() {
         <div className={`fixed top-5 right-5 z-50 px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${
           toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
         }`}>
-          <span>{toast.type === 'error' ? '⚠' : '✓'}</span>
+          {toast.type === 'error' ? (
+            <svg className="w-5 h-5 fill-current" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+            </svg>
+          ) : (
+            <svg className="w-5 h-5 fill-current" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+            </svg>
+          )}
           <span>{toast.message}</span>
         </div>
       )}
 
-      {(isAnalyzing || isGenerating) && (
+      {isAnalyzing && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
           <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-slate-100">
             <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="font-title text-xl font-bold text-[#002060] mb-2">
-              {isAnalyzing ? 'Procesando con IA...' : 'Generando Documento...'}
-            </p>
-            <p className="text-sm text-slate-500">
-              {isAnalyzing ? 'Subiendo archivos a la nube y evaluando manual...' : 'Consolidando tablas e imágenes...'}
-            </p>
+            <p className="font-title text-xl font-bold text-[#002060] mb-2">Procesando con IA...</p>
+            <p className="text-sm text-slate-500">Subiendo archivos a la nube y evaluando manual...</p>
           </div>
         </div>
       )}
@@ -564,9 +509,12 @@ export default function Analisisdatos() {
                 type="button"
                 onClick={handleAnalizarConIA}
                 disabled={isAnalyzing}
-                className="w-full md:w-auto bg-[#003087] hover:bg-[#002060] text-white font-bold py-3 px-8 rounded-xl shadow-md transition"
+                className="w-full md:w-auto bg-[#003087] hover:bg-[#002060] text-white font-bold py-3 px-8 rounded-xl shadow-md transition flex items-center justify-center gap-2"
               >
-                ⚡ Analizar con IA
+                <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
+                </svg>
+                Analizar con IA (Guardar Auto)
               </button>
             </div>
 
@@ -598,7 +546,9 @@ export default function Analisisdatos() {
                         onClick={() => removeImagen(img.id)}
                         className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold"
                       >
-                        ✕
+                        <svg className="w-3 h-3 fill-current" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
                       </button>
                     </div>
                   ))}
@@ -719,9 +669,9 @@ export default function Analisisdatos() {
             </div>
 
             <div className="lg:col-span-5 bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl p-6 text-center flex flex-col items-center justify-center min-h-[250px]">
-              <div className="w-12 h-12 bg-slate-200 text-slate-600 rounded-full flex items-center justify-center font-bold mb-3">
-                🖼️
-              </div>
+              <svg className="w-10 h-10 text-slate-400 fill-current mb-2" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+              </svg>
               <p className="font-title text-sm font-bold text-slate-700 uppercase mb-1">
                 Espacio Reservado para Diagrama / Matriz
               </p>
@@ -729,32 +679,36 @@ export default function Analisisdatos() {
           </div>
         </div>
 
-        {/* ACCIONES */}
+        {/* ACCIONES DEL PIE DE PÁGINA */}
         <div className="pt-8 border-t border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
-          <Link
-            to="/formulario"
-            className="w-full md:w-auto bg-slate-600 hover:bg-slate-700 text-white font-bold py-3.5 px-8 rounded-xl text-center transition"
-          >
-            ⬅ Atrás (Datos Empresa)
+          <Link className="w-full md:w-auto bg-slate-600 hover:bg-slate-700 text-white font-bold py-3.5 px-8 rounded-xl text-center transition flex items-center justify-center gap-2" to="/formulario">
+            <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
+            </svg>
+            Atrás (Datos Empresa)
           </Link>
 
           <div className="flex flex-col md:flex-row gap-4 w-full md:w-auto">
             <button
               type="button"
-              onClick={handleNuevoEquipo}
-              className="w-full md:w-auto bg-[#003087] hover:bg-[#002060] text-white font-bold py-3.5 px-8 rounded-xl shadow transition"
+              onClick={handleLimpiarFormulario}
+              className="w-full md:w-auto bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold py-3.5 px-6 rounded-xl transition flex items-center justify-center gap-2"
             >
-              + Nuevo Equipo (Guardar Borrador)
+              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+              </svg>
+              Limpiar / Capturar Otro
             </button>
 
-            <button
-              type="button"
-              onClick={handleGenerarDocumento}
-              disabled={isGenerating}
-              className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 px-8 rounded-xl shadow-lg transition"
+            <Link
+              to="/mis-equipos"
+              className="w-full md:w-auto bg-[#002060] hover:bg-[#001040] text-white font-bold py-3.5 px-8 rounded-xl shadow transition flex items-center justify-center gap-2"
             >
-              📄 Generar Archivo (.DOC)
-            </button>
+              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+              </svg>
+              Ver Mis Equipos
+            </Link>
           </div>
         </div>
 
