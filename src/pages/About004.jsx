@@ -224,7 +224,7 @@ export default function About004() {
           Es momento de llevar estos lineamientos a la práctica. Inicia la evaluación interactiva de tu maquinaria ahora mismo.
         </p>
         <Link 
-          to="/instrucciones" 
+          to="/formulario" 
           className="inline-block bg-[#0a0f16] text-white font-title font-bold text-lg uppercase tracking-wider py-4 px-10 rounded-full hover:bg-black transition-all hover:scale-105 shadow-[0_0_30px_rgba(0,0,0,0.5)] border border-white/10"
         >
           Iniciar Análisis NOM-004
