@@ -4,6 +4,27 @@ import { dbService } from '../services/dbService';
 import { generarDocumentoWord } from '../services/n8nService';
 import { getDeviceId } from '../utils/deviceId';
 
+// Convertidor asíncrono de imágenes de Supabase a Base64 en el navegador
+const urlToBase64Navegador = async (url) => {
+  if (!url) return null;
+  if (typeof url === 'string' && url.startsWith('data:image')) return url;
+
+  try {
+    const cleanUrl = String(url).replace(/[\r\n\t\s]/g, "").trim();
+    const res = await fetch(cleanUrl);
+    const blob = await res.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = () => resolve(cleanUrl);
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    console.error("Error convirtiendo imagen en el navegador:", e);
+    return url;
+  }
+};
+
 export default function MisEquipos() {
   const [equipos, setEquipos] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -45,10 +66,35 @@ export default function MisEquipos() {
     setIsGenerating(true);
 
     try {
+      showToast('Procesando imágenes para el documento...', 'success');
+
+      // 1. Convertir imágenes de cada equipo a Base64 en el cliente
+      const equiposProcesados = await Promise.all(
+        equipos.map(async (eq) => {
+          const rawImgs = eq.imagenes_urls || eq.imagenes || [];
+          const imgsArray = Array.isArray(rawImgs) ? rawImgs : [rawImgs];
+
+          const imagenesB64 = await Promise.all(
+            imgsArray.map(async (item) => {
+              const urlStr = typeof item === 'string' ? item : (item?.url || item?.src || item?.base64);
+              if (!urlStr) return null;
+              return await urlToBase64Navegador(urlStr);
+            })
+          );
+
+          return {
+            ...eq,
+            imagenes_base64: imagenesB64.filter(Boolean)
+          };
+        })
+      );
+
+      // 2. Extraer datos de la empresa guardados en localStorage
       const datosEmpresaRaw = localStorage.getItem('programa_seguridad_todos_datos');
       const datosEmpresa = datosEmpresaRaw ? JSON.parse(datosEmpresaRaw) : {};
       const logoEmpresa = localStorage.getItem('company_logo') || null;
 
+      // 3. Construir el payload consolidado
       const payloadConsolidado = {
         device_id: getDeviceId(),
         empresa: datosEmpresa.company_name || '',
@@ -60,11 +106,13 @@ export default function MisEquipos() {
         especialista: datosEmpresa.specialist_name || '',
         registro_stps: datosEmpresa.stps_register || '',
         logo: logoEmpresa,
-        equipos: equipos
+        equipos: equiposProcesados
       };
 
+      // 4. Enviar a n8n
       const blob = await generarDocumentoWord(payloadConsolidado);
 
+      // 5. Descargar el archivo Word resultante
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
