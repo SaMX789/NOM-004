@@ -135,40 +135,77 @@ export default function Analisisdatos() {
 
   const handleArchivoChange = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      setEquipoData(prev => ({
-        ...prev,
-        archivo_adjunto: file,
-        archivo_nombre: file.name,
-        manual_url: ''
-      }));
-      showToast(`Manual "${file.name}" seleccionado`, 'success');
+    if (!file) return;
+
+    const esPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+    if (!esPdf) {
+      showToast('El manual debe ser exclusivamente un archivo PDF.', 'error');
+      e.target.value = '';
+      return;
     }
+
+    setEquipoData(prev => ({
+      ...prev,
+      archivo_adjunto: file,
+      archivo_nombre: file.name,
+      manual_url: ''
+    }));
+
+    showToast(`Manual "${file.name}" seleccionado`, 'success');
   };
 
   const handleImagenesChange = async (e) => {
     const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    // Validación flexible que tolera variaciones de tipos MIME y extensiones
+    const imagenesValidas = files.filter(file => {
+      const type = file.type ? file.type.toLowerCase() : '';
+      const name = file.name ? file.name.toLowerCase() : '';
+      return type.startsWith('image/jpeg') || 
+             type.startsWith('image/png') || 
+             type.startsWith('image/jpg') || 
+             /\.(jpg|jpeg|png)$/i.test(name);
+    });
+
+    if (imagenesValidas.length < files.length) {
+      showToast('Algunos archivos se ignoraron. Solo se permiten formatos JPG, JPEG o PNG.', 'error');
+    }
+
+    if (imagenesValidas.length === 0) {
+      e.target.value = '';
+      return;
+    }
+
     showToast("Comprimiendo imágenes...", "success");
 
-    for (const file of files) {
+    const nuevasImagenes = [];
+
+    for (const file of imagenesValidas) {
       try {
         const compressedFile = await comprimirImagen(file);
         const previewUrl = URL.createObjectURL(compressedFile);
         const id = 'img_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5);
 
-        const newImgObj = {
+        nuevasImagenes.push({
           id,
-          name: compressedFile.name,
+          name: compressedFile.name || file.name,
           file: compressedFile,
           preview: previewUrl,
           url: ''
-        };
-
-        setImagenesCargadas(prev => [...prev, newImgObj]);
+        });
       } catch (error) {
-        showToast(`Error comprimiendo ${file.name}: ${error.message}`, 'error');
+        console.error("Error al comprimir la imagen:", error);
+        showToast(`Error al procesar "${file.name}"`, 'error');
       }
     }
+
+    // CORRECCIÓN CLAVE: Actualizamos imagenesCargadas que es el estado que renderiza la vista
+    setImagenesCargadas(prev => [...prev, ...nuevasImagenes]);
+    showToast(`${nuevasImagenes.length} imagen(es) procesada(s)`, 'success');
+
+    e.target.value = '';
   };
 
   const removeImagen = (id) => {
@@ -246,7 +283,6 @@ export default function Analisisdatos() {
 
       const response = await analizarEquipoConIA(payload);
 
-      // Calcular estados actualizados
       const nuevaDescripcion = response?.descripcion || equipoData.descripcion_manual;
       
       let nuevosRiesgos = { ...riesgosState };
@@ -265,7 +301,6 @@ export default function Analisisdatos() {
 
       const nuevaMatriz = response?.matriz || matrizState;
 
-      // Actualizar interfaz
       setEquipoData(prev => ({
         ...prev,
         descripcion_manual: nuevaDescripcion,
@@ -274,7 +309,6 @@ export default function Analisisdatos() {
       setRiesgosState(nuevosRiesgos);
       setMatrizState(nuevaMatriz);
 
-      // AUTO-GUARDADO EN INDEXEDDB (MIS EQUIPOS)
       const idDefinitivo = equipoData.id || `eq_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
       const equipoAutoGuardado = {
@@ -494,7 +528,7 @@ export default function Analisisdatos() {
                     Seleccionar Archivo
                     <input
                       type="file"
-                      accept=".pdf,.doc,.docx"
+                      accept="application/pdf"
                       onChange={handleArchivoChange}
                       className="hidden"
                     />
@@ -526,7 +560,7 @@ export default function Analisisdatos() {
                   <input
                     type="file"
                     multiple
-                    accept="image/*"
+                    accept="image/jpeg,image/jpg,image/png"
                     onChange={handleImagenesChange}
                     className="hidden"
                   />
@@ -544,7 +578,7 @@ export default function Analisisdatos() {
                       <button
                         type="button"
                         onClick={() => removeImagen(img.id)}
-                        className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold"
+                        className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md hover:bg-red-700 transition"
                       >
                         <svg className="w-3 h-3 fill-current" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
