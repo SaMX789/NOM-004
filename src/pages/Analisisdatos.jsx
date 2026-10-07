@@ -379,7 +379,7 @@ export default function Analisisdatos() {
           Análisis de Riesgo de Maquinaria
         </h1>
         <p className="text-blue-200 text-base md:text-lg max-w-3xl mx-auto">
-          Captura técnica optimizada con almacenamiento en nube e IndexedDB.
+          Captura técnica optimizada con almacenamiento en nube.
         </p>
       </div>
 
@@ -548,12 +548,12 @@ export default function Analisisdatos() {
                 <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
                 </svg>
-                Analizar con IA (Guardar Auto)
+                Análisis con IA (Guardado Auto)
               </button>
             </div>
 
             <div>
-              <label className="block font-bold text-slate-800 text-sm mb-2">Evidencia Fotográfica (Se comprime automáticamente)</label>
+              <label className="block font-bold text-slate-800 text-sm mb-2">Evidencia Fotográfica (jpg, jpeg y png)</label>
               <div className="flex items-center gap-4">
                 <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold py-2 px-4 rounded-lg transition">
                   + Agregar Imágenes
