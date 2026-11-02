@@ -1,9 +1,13 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import logoImg from '../img/logo.png';
+import { useAuth } from '../context/AuthContext';
 
 export default function Navbar() {
   const [isOpen, setIsOpen] = useState(false);
+  const { user, loading, loginWithGoogle, logout } = useAuth();
+  const nombreUsuario = user?.user_metadata?.full_name || user?.email;
+  const avatar = user?.user_metadata?.avatar_url;
 
   const toggleMenu = () => {
     setIsOpen(!isOpen);
@@ -47,6 +51,33 @@ export default function Navbar() {
             <Link to="/mis-equipos" className="hover:text-blue-600 transition-colors whitespace-nowrap">
               Mis Equipos
             </Link>
+          </div>
+
+          {/* Sesión (escritorio) */}
+          <div className="hidden lg:flex items-center gap-3 shrink-0">
+            {!loading && (user ? (
+              <>
+                {avatar && (
+                  <img src={avatar} alt="Avatar" referrerPolicy="no-referrer" className="w-8 h-8 rounded-full border border-slate-200" />
+                )}
+                <span className="text-sm font-semibold text-slate-700 max-w-[140px] truncate">{nombreUsuario}</span>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="text-sm font-bold text-red-600 hover:text-red-800 transition"
+                >
+                  Cerrar sesión
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={loginWithGoogle}
+                className="bg-[#002060] hover:bg-[#003087] text-white text-sm font-bold py-2 px-4 rounded-lg transition whitespace-nowrap"
+              >
+                Iniciar sesión con Google
+              </button>
+            ))}
           </div>
 
           {/* Botón Hamburguesa (Móvil y Pantallas Medias menores a 'lg') */}
@@ -110,6 +141,27 @@ export default function Navbar() {
           >
             Mis Equipos
           </Link>
+          {!loading && (
+            <div className="pt-3 mt-2 border-t border-gray-100">
+              {user ? (
+                <button
+                  type="button"
+                  onClick={() => { logout(); closeMenu(); }}
+                  className="block w-full text-left py-2.5 px-3 rounded-lg text-red-600 hover:bg-red-50 transition"
+                >
+                  Cerrar sesión ({nombreUsuario})
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { loginWithGoogle(); closeMenu(); }}
+                  className="block w-full text-left py-2.5 px-3 rounded-lg bg-[#002060] text-white hover:bg-[#003087] transition"
+                >
+                  Iniciar sesión con Google
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </nav>
