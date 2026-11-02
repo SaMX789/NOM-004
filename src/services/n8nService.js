@@ -17,10 +17,22 @@ export async function analizarEquipoConIA(dataEquipo) {
     });
 
     if (!response.ok) {
+      if (response.status === 500 || response.status === 502 || response.status === 503) {
+        throw new Error('Hubo un problema con el servicio de IA. Por favor contacte a soporte.');
+      }
       throw new Error(`Error en la respuesta del servidor: ${response.status}`);
     }
 
-    return await response.json();
+    const text = await response.text();
+    if (!text || text.trim() === '') {
+      throw new Error('Hubo un problema con el servicio de IA. Por favor contacte a soporte.');
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error('Hubo un problema al procesar con la IA. Por favor contacte a soporte.');
+    }
   } catch (error) {
     console.error('Error al analizar equipo con n8n:', error);
     throw error;

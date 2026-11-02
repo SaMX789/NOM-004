@@ -5,6 +5,7 @@ import { comprimirImagen } from '../utils/imageCompressor';
 import { subirArchivoSupabase } from '../services/storageService';
 import { dbService } from '../services/dbService';
 import { getDeviceId } from '../utils/deviceId';
+import diagramaImg from '../img/diagrama.png'; 
 
 const RIESGOS_BASE = [
   { group: 'a', code: 'a1', name: '1.- Partes en movimiento' },
@@ -77,7 +78,7 @@ export default function Analisisdatos() {
       if (eq.matriz) setMatrizState(eq.matriz);
 
       if (eq.imagenes_urls && Array.isArray(eq.imagenes_urls)) {
-        setImagenesCargadas(eq.imagenes_urls.map((url, index) => ({
+        setImagenesCargadas(eq.imagenes_urls.slice(0, 3).map((url, index) => ({
           id: `img_loaded_${index}`,
           name: `Imagen ${index + 1}`,
           file: null,
@@ -159,8 +160,16 @@ export default function Analisisdatos() {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
 
-    // Validación flexible que tolera variaciones de tipos MIME y extensiones
-    const imagenesValidas = files.filter(file => {
+    const espacioDisponible = 3 - imagenesCargadas.length;
+
+    if (espacioDisponible <= 0) {
+      showToast('Ya has alcanzado el límite máximo de 3 imágenes por equipo.', 'error');
+      e.target.value = '';
+      return;
+    }
+
+    // Validación flexible de formatos
+    let imagenesValidas = files.filter(file => {
       const type = file.type ? file.type.toLowerCase() : '';
       const name = file.name ? file.name.toLowerCase() : '';
       return type.startsWith('image/jpeg') || 
@@ -176,6 +185,12 @@ export default function Analisisdatos() {
     if (imagenesValidas.length === 0) {
       e.target.value = '';
       return;
+    }
+
+    // Control de límite máximo a 3
+    if (imagenesValidas.length > espacioDisponible) {
+      showToast(`Solo se procesarán las primeras ${espacioDisponible} foto(s) para no exceder el máximo de 3.`, 'error');
+      imagenesValidas = imagenesValidas.slice(0, espacioDisponible);
     }
 
     showToast("Comprimiendo imágenes...", "success");
@@ -201,7 +216,6 @@ export default function Analisisdatos() {
       }
     }
 
-    // CORRECCIÓN CLAVE: Actualizamos imagenesCargadas que es el estado que renderiza la vista
     setImagenesCargadas(prev => [...prev, ...nuevasImagenes]);
     showToast(`${nuevasImagenes.length} imagen(es) procesada(s)`, 'success');
 
@@ -316,7 +330,6 @@ export default function Analisisdatos() {
         device_id: getDeviceId(),
         fecha: new Date().toLocaleString(),
         ...equipoData,
-        id: idDefinitivo,
         descripcion_manual: nuevaDescripcion,
         manual_url: manualPublicUrl,
         archivo_adjunto: null,
@@ -330,7 +343,13 @@ export default function Analisisdatos() {
 
       showToast('Análisis técnico completado y guardado en Mis Equipos', 'success');
     } catch (error) {
-      showToast('Error en el proceso: ' + error.message, 'error');
+      let msg = error?.message || '';
+      if (msg.includes('JSON') || msg.includes('Unexpected end') || msg.includes('Failed to execute')) {
+        msg = 'Hubo un problema con el servicio de IA (posiblemente créditos agotados o servicio no disponible). Por favor contacte a soporte.';
+      } else {
+        msg = 'Error en el proceso: ' + msg;
+      }
+      showToast(msg, 'error');
     } finally {
       setIsAnalyzing(false);
     }
@@ -553,27 +572,34 @@ export default function Analisisdatos() {
             </div>
 
             <div>
-              <label className="block font-bold text-slate-800 text-sm mb-2">Evidencia Fotográfica (jpg, jpeg y png)</label>
+              <label className="block font-bold text-slate-800 text-sm mb-2">
+                Evidencia Fotográfica (jpg, jpeg y png) - <span className="text-blue-700">Máximo 3 fotos</span>
+              </label>
               <div className="flex items-center gap-4">
-                <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold py-2 px-4 rounded-lg transition">
+                <label className={`text-xs font-bold py-2 px-4 rounded-lg transition ${
+                  imagenesCargadas.length >= 3 
+                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60' 
+                    : 'bg-slate-200 hover:bg-slate-300 text-slate-800 cursor-pointer'
+                }`}>
                   + Agregar Imágenes
                   <input
                     type="file"
                     multiple
                     accept="image/jpeg,image/jpg,image/png"
                     onChange={handleImagenesChange}
+                    disabled={imagenesCargadas.length >= 3}
                     className="hidden"
                   />
                 </label>
-                <span className="text-xs text-slate-500">
-                  {imagenesCargadas.length > 0 ? `${imagenesCargadas.length} foto(s) optimizada(s)` : 'Ninguna imagen seleccionada'}
+                <span className="text-xs text-slate-500 font-medium">
+                  {imagenesCargadas.length > 0 ? `${imagenesCargadas.length} / 3 foto(s) optimizada(s)` : 'Ninguna imagen seleccionada (Máx 3)'}
                 </span>
               </div>
 
               {imagenesCargadas.length > 0 && (
                 <div className="flex flex-wrap gap-4 mt-4">
                   {imagenesCargadas.map((img) => (
-                    <div key={img.id} className="relative group w-24 h-24 border border-slate-200 rounded-lg overflow-hidden bg-slate-100">
+                    <div key={img.id} className="relative group w-24 h-24 border border-slate-200 rounded-lg overflow-hidden bg-slate-100 shadow-sm">
                       <img src={img.preview} alt={img.name} className="w-full h-full object-cover" />
                       <button
                         type="button"
@@ -702,13 +728,12 @@ export default function Analisisdatos() {
               </table>
             </div>
 
-            <div className="lg:col-span-5 bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl p-6 text-center flex flex-col items-center justify-center min-h-[250px]">
-              <svg className="w-10 h-10 text-slate-400 fill-current mb-2" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
-              </svg>
-              <p className="font-title text-sm font-bold text-slate-700 uppercase mb-1">
-                Espacio Reservado para Diagrama / Matriz
-              </p>
+            <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-center min-h-[250px] shadow-sm overflow-hidden">
+              <img 
+                src={diagramaImg} 
+                alt="Diagrama / Matriz NOM-004" 
+                className="w-full h-auto max-h-[350px] object-contain rounded-xl"
+              />
             </div>
           </div>
         </div>
