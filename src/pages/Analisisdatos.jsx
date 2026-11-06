@@ -1,170 +1,95 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, Link, useLocation } from 'react-router-dom';
-import { analizarEquipoConIA } from '../services/n8nService';
+import { Link, useLocation } from 'react-router-dom';
+import { preAnalizarEquipo } from '../services/n8nService';
 import { comprimirImagen } from '../utils/imageCompressor';
-import { subirArchivoSupabase } from '../services/storageService';
-import { dbService } from '../services/dbService';
-import { getDeviceId } from '../utils/deviceId';
-import diagramaImg from '../img/diagrama.png'; 
+import { subirImagenSupabase } from '../services/storageService';
+import { dbService, EQUIPO_STATUS } from '../services/dbService';
+import { useAuth } from '../context/AuthContext';
 
-const RIESGOS_BASE = [
-  { group: 'a', code: 'a1', name: '1.- Partes en movimiento' },
-  { group: 'a', code: 'a2', name: '2.- Generación de calor' },
-  { group: 'a', code: 'a3', name: '3.- Generación de electricidad estática' },
-  { group: 'b', code: 'b1', name: '1.- Superficies cortantes' },
-  { group: 'b', code: 'b2', name: '2.- Proyección de materia prima, subproducto y producto terminado' },
-  { group: 'b', code: 'b3', name: '3.- Calentamiento de materia prima, subproducto y producto terminado' },
-  { group: 'c', code: 'c1', name: '1.- Manejo de herramientas' },
-  { group: 'c', code: 'c2', name: '2.- Condiciones de operación' },
-];
+const MIN_IMAGENES = 1;
+const MAX_IMAGENES = 2;
+
+const EQUIPO_VACIO = {
+  id: null,
+  status: null,
+  equipo: '',
+  descripcion_manual: '',
+  identificacion: '',
+  departamento: ''
+};
+
+const TOAST_OCULTO = { show: false, message: '', type: 'success' };
+
+const liberarPreview = (img) => {
+  if (img?.file && img.preview?.startsWith('blob:')) URL.revokeObjectURL(img.preview);
+};
+
+// Convierte un equipo guardado (Supabase) al estado del formulario
+const equipoAFormulario = (eq) => ({
+  id: eq.id,
+  status: eq.status || EQUIPO_STATUS.BORRADOR,
+  equipo: eq.equipo || '',
+  descripcion_manual: eq.descripcion_manual || '',
+  identificacion: eq.identificacion || '',
+  departamento: eq.departamento || ''
+});
+
+const urlsAImagenes = (urls) =>
+  (Array.isArray(urls) ? urls : []).slice(0, MAX_IMAGENES).map((url, index) => ({
+    id: `img_loaded_${index}`,
+    name: `Imagen ${index + 1}`,
+    file: null,
+    preview: url,
+    url
+  }));
 
 export default function Analisisdatos() {
   const location = useLocation();
-  const navigate = useNavigate();
+  const { userId } = useAuth();
 
-  const [equipoData, setEquipoData] = useState({
-    id: null,
-    equipo: '',
-    identificacion: '',
-    departamento: '',
-    operadores: '',
-    horas: '',
-    dias: [],
-    turnos: [],
-    descripcion_manual: '',
-    archivo_adjunto: null,
-    archivo_nombre: '',
-    manual_url: ''
-  });
+  // Si se llega desde "Mis Equipos" con un equipo a editar, se precarga en el estado inicial
+  const equipoEditar = location.state?.equipoEditar;
 
-  const [riesgosState, setRiesgosState] = useState(
-    RIESGOS_BASE.reduce((acc, curr) => {
-      acc[curr.code] = { presente: false, ausente: false, observacion: '' };
-      return acc;
-    }, {})
+  const [equipoData, setEquipoData] = useState(() =>
+    equipoEditar ? equipoAFormulario(equipoEditar) : EQUIPO_VACIO
+  );
+  const [imagenesCargadas, setImagenesCargadas] = useState(() =>
+    urlsAImagenes(equipoEditar?.imagenes_urls)
+  );
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [toast, setToast] = useState(() =>
+    equipoEditar
+      ? { show: true, message: `Equipo "${equipoEditar.equipo || 'Sin nombre'}" cargado para edición`, type: 'success' }
+      : TOAST_OCULTO
   );
 
-  const [matrizState, setMatrizState] = useState([]);
-  const [imagenesCargadas, setImagenesCargadas] = useState([]);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
+  const isBusy = isAnalyzing || isSaving;
 
   const showToast = (message, type = 'success') => {
     setToast({ show: true, message, type });
-    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 4000);
   };
 
-  // Cargar datos cuando se accede para editar desde "Mis Equipos"
+  // Oculta el toast 4 s después de mostrarse (se reinicia si llega otro mensaje)
   useEffect(() => {
-    if (location.state?.equipoEditar) {
-      const eq = location.state.equipoEditar;
-      
-      setEquipoData({
-        id: eq.id,
-        equipo: eq.equipo || '',
-        identificacion: eq.identificacion || '',
-        departamento: eq.departamento || '',
-        operadores: eq.operadores || '',
-        horas: eq.horas || '',
-        dias: eq.dias || [],
-        turnos: eq.turnos || [],
-        descripcion_manual: eq.descripcion_manual || eq.descripcion || '',
-        archivo_adjunto: null,
-        archivo_nombre: eq.archivo_nombre || '',
-        manual_url: eq.manual_url || ''
-      });
-
-      if (eq.riesgos) setRiesgosState(eq.riesgos);
-      if (eq.matriz) setMatrizState(eq.matriz);
-
-      if (eq.imagenes_urls && Array.isArray(eq.imagenes_urls)) {
-        setImagenesCargadas(eq.imagenes_urls.slice(0, 3).map((url, index) => ({
-          id: `img_loaded_${index}`,
-          name: `Imagen ${index + 1}`,
-          file: null,
-          preview: url,
-          url: url
-        })));
-      }
-
-      showToast(`Equipo "${eq.equipo}" cargado para edición`, 'success');
-    }
-  }, [location.state]);
+    if (!toast.show) return;
+    const timer = setTimeout(() => setToast(TOAST_OCULTO), 4000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    if (name === 'horas') {
-      const numVal = parseFloat(value);
-      if (numVal > 24) {
-        showToast('Las horas por turno no pueden ser mayores a 24', 'error');
-        setEquipoData(prev => ({ ...prev, horas: 24 }));
-        return;
-      }
-    }
     setEquipoData(prev => ({ ...prev, [name]: value }));
-  };
-
-  const handleCheckboxArray = (field, val) => {
-    setEquipoData(prev => {
-      const exists = prev[field].includes(val);
-      const updated = exists ? prev[field].filter(item => item !== val) : [...prev[field], val];
-      return { ...prev, [field]: updated };
-    });
-  };
-
-  const handleRiesgoChange = (code, field, val) => {
-    setRiesgosState(prev => {
-      const current = prev[code];
-      let updated = { ...current };
-
-      if (field === 'presente') {
-        updated.presente = val;
-        if (val) updated.ausente = false;
-      } else if (field === 'ausente') {
-        updated.ausente = val;
-        if (val) {
-          updated.presente = false;
-          updated.observacion = 'No aplica';
-        }
-      } else if (field === 'observacion') {
-        updated.observacion = val;
-      }
-
-      return { ...prev, [code]: updated };
-    });
-  };
-
-  const handleArchivoChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const esPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-
-    if (!esPdf) {
-      showToast('El manual debe ser exclusivamente un archivo PDF.', 'error');
-      e.target.value = '';
-      return;
-    }
-
-    setEquipoData(prev => ({
-      ...prev,
-      archivo_adjunto: file,
-      archivo_nombre: file.name,
-      manual_url: ''
-    }));
-
-    showToast(`Manual "${file.name}" seleccionado`, 'success');
   };
 
   const handleImagenesChange = async (e) => {
     const files = Array.from(e.target.files);
+    e.target.value = '';
     if (files.length === 0) return;
 
-    const espacioDisponible = 3 - imagenesCargadas.length;
-
+    const espacioDisponible = MAX_IMAGENES - imagenesCargadas.length;
     if (espacioDisponible <= 0) {
-      showToast('Ya has alcanzado el límite máximo de 3 imágenes por equipo.', 'error');
-      e.target.value = '';
+      showToast(`Ya alcanzaste el límite máximo de ${MAX_IMAGENES} imágenes por equipo.`, 'error');
       return;
     }
 
@@ -172,210 +97,166 @@ export default function Analisisdatos() {
     let imagenesValidas = files.filter(file => {
       const type = file.type ? file.type.toLowerCase() : '';
       const name = file.name ? file.name.toLowerCase() : '';
-      return type.startsWith('image/jpeg') || 
-             type.startsWith('image/png') || 
-             type.startsWith('image/jpg') || 
+      return type.startsWith('image/jpeg') ||
+             type.startsWith('image/png') ||
+             type.startsWith('image/jpg') ||
              /\.(jpg|jpeg|png)$/i.test(name);
     });
 
     if (imagenesValidas.length < files.length) {
       showToast('Algunos archivos se ignoraron. Solo se permiten formatos JPG, JPEG o PNG.', 'error');
     }
+    if (imagenesValidas.length === 0) return;
 
-    if (imagenesValidas.length === 0) {
-      e.target.value = '';
-      return;
-    }
-
-    // Control de límite máximo a 3
     if (imagenesValidas.length > espacioDisponible) {
-      showToast(`Solo se procesarán las primeras ${espacioDisponible} foto(s) para no exceder el máximo de 3.`, 'error');
+      showToast(`Solo se procesarán las primeras ${espacioDisponible} foto(s) para no exceder el máximo de ${MAX_IMAGENES}.`, 'error');
       imagenesValidas = imagenesValidas.slice(0, espacioDisponible);
     }
 
-    showToast("Comprimiendo imágenes...", "success");
-
     const nuevasImagenes = [];
-
     for (const file of imagenesValidas) {
       try {
         const compressedFile = await comprimirImagen(file);
-        const previewUrl = URL.createObjectURL(compressedFile);
-        const id = 'img_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5);
-
         nuevasImagenes.push({
-          id,
+          id: 'img_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
           name: compressedFile.name || file.name,
           file: compressedFile,
-          preview: previewUrl,
+          preview: URL.createObjectURL(compressedFile),
           url: ''
         });
       } catch (error) {
-        console.error("Error al comprimir la imagen:", error);
+        console.error('Error al comprimir la imagen:', error);
         showToast(`Error al procesar "${file.name}"`, 'error');
       }
     }
 
     setImagenesCargadas(prev => [...prev, ...nuevasImagenes]);
-    showToast(`${nuevasImagenes.length} imagen(es) procesada(s)`, 'success');
-
-    e.target.value = '';
+    if (nuevasImagenes.length > 0) {
+      showToast(`${nuevasImagenes.length} imagen(es) comprimida(s) (≤ 500 KB)`, 'success');
+    }
   };
 
   const removeImagen = (id) => {
-    setImagenesCargadas(prev => prev.filter(img => img.id !== id));
+    setImagenesCargadas(prev => {
+      liberarPreview(prev.find(img => img.id === id));
+      return prev.filter(img => img.id !== id);
+    });
   };
 
   const handleLimpiarFormulario = () => {
-    setEquipoData({
-      id: null,
-      equipo: '',
-      identificacion: '',
-      departamento: '',
-      operadores: '',
-      horas: '',
-      dias: [],
-      turnos: [],
-      descripcion_manual: '',
-      archivo_adjunto: null,
-      archivo_nombre: '',
-      manual_url: ''
-    });
-
-    setRiesgosState(
-      RIESGOS_BASE.reduce((acc, curr) => {
-        acc[curr.code] = { presente: false, ausente: false, observacion: '' };
-        return acc;
-      }, {})
-    );
-
-    setMatrizState([]);
+    imagenesCargadas.forEach(liberarPreview);
+    setEquipoData(EQUIPO_VACIO);
     setImagenesCargadas([]);
     showToast('Formulario listo para un nuevo equipo', 'success');
   };
 
-  // --- ANALIZAR CON IA Y GUARDAR AUTOMÁTICAMENTE EN MIS EQUIPOS ---
-  const handleAnalizarConIA = async () => {
-    if (!equipoData.equipo.trim()) {
-      showToast('Por favor ingrese el nombre del equipo antes de analizar', 'error');
-      return;
+  // Sube a Supabase Storage ('equipos-fotos') solo las imágenes que aún no tienen URL
+  const subirImagenesPendientes = async () => {
+    const actualizadas = await Promise.all(
+      imagenesCargadas.map(async (img) => {
+        if (img.url) return img;
+        const url = await subirImagenSupabase(img.file, userId, 'imagenes');
+        return { ...img, url };
+      })
+    );
+    setImagenesCargadas(actualizadas);
+    return actualizadas.map(img => img.url);
+  };
+
+  const persistirBorrador = async (datos) => {
+    const guardado = await dbService.guardarBorrador(userId, { id: equipoData.id, ...datos });
+    setEquipoData(prev => ({ ...prev, id: guardado.id, status: guardado.status }));
+    return guardado;
+  };
+
+  const validarImagenes = () => {
+    if (imagenesCargadas.length < MIN_IMAGENES) {
+      showToast(`Agrega al menos ${MIN_IMAGENES} fotografía del equipo (máximo ${MAX_IMAGENES}).`, 'error');
+      return false;
     }
+    if (imagenesCargadas.length > MAX_IMAGENES) {
+      showToast(`Solo se permiten máximo ${MAX_IMAGENES} fotografías por equipo.`, 'error');
+      return false;
+    }
+    return true;
+  };
+
+  // --- FASE 1: PRE-ANÁLISIS VISUAL CON IA + GUARDADO COMO BORRADOR ---
+  const handlePreAnalisis = async () => {
+    if (!validarImagenes()) return;
 
     setIsAnalyzing(true);
-
     try {
-      let manualPublicUrl = equipoData.manual_url;
+      const imagenesUrls = await subirImagenesPendientes();
 
-      if (equipoData.archivo_adjunto && !manualPublicUrl) {
-        showToast('Subiendo manual PDF a la nube...', 'success');
-        manualPublicUrl = await subirArchivoSupabase(equipoData.archivo_adjunto, 'manuales');
-      }
-
-      const imagenesConUrls = await Promise.all(
-        imagenesCargadas.map(async (img) => {
-          if (img.url) return img.url;
-          const url = await subirArchivoSupabase(img.file, 'imagenes');
-          img.url = url;
-          return url;
-        })
-      );
-
-      const payload = {
-        device_id: getDeviceId(),
-        equipo: equipoData.equipo,
+      const resultado = await preAnalizarEquipo({
+        user_id: userId,
+        equipo_id: equipoData.id,
         identificacion: equipoData.identificacion,
         departamento: equipoData.departamento,
-        operadores: equipoData.operadores,
-        horas: equipoData.horas,
-        dias: equipoData.dias,
-        turnos: equipoData.turnos,
-        descripcion_manual: equipoData.descripcion_manual,
-        nombre_manual: equipoData.archivo_nombre,
-        manual_url: manualPublicUrl || null,
-        imagenes_urls: imagenesConUrls
-      };
+        imagenes_urls: imagenesUrls
+      });
 
-      const response = await analizarEquipoConIA(payload);
+      const nombre = resultado.nombre_equipo || equipoData.equipo;
+      const descripcion = resultado.descripcion || equipoData.descripcion_manual;
 
-      const nuevaDescripcion = response?.descripcion || equipoData.descripcion_manual;
-      
-      let nuevosRiesgos = { ...riesgosState };
-      if (response?.riesgos) {
-        Object.keys(response.riesgos).forEach(key => {
-          if (nuevosRiesgos[key]) {
-            const rIA = response.riesgos[key];
-            nuevosRiesgos[key] = {
-              presente: rIA.presente === true,
-              ausente: rIA.presente === false,
-              observacion: rIA.observacion || (rIA.presente === false ? 'No aplica' : '')
-            };
-          }
-        });
-      }
+      setEquipoData(prev => ({ ...prev, equipo: nombre, descripcion_manual: descripcion }));
 
-      const nuevaMatriz = response?.matriz || matrizState;
+      await persistirBorrador({
+        equipo: nombre,
+        descripcion_manual: descripcion,
+        identificacion: equipoData.identificacion,
+        departamento: equipoData.departamento,
+        imagenes_urls: imagenesUrls
+      });
 
-      setEquipoData(prev => ({
-        ...prev,
-        descripcion_manual: nuevaDescripcion,
-        manual_url: manualPublicUrl
-      }));
-      setRiesgosState(nuevosRiesgos);
-      setMatrizState(nuevaMatriz);
-
-      const idDefinitivo = equipoData.id || `eq_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-      const equipoAutoGuardado = {
-        id: idDefinitivo,
-        device_id: getDeviceId(),
-        fecha: new Date().toLocaleString(),
-        ...equipoData,
-        descripcion_manual: nuevaDescripcion,
-        manual_url: manualPublicUrl,
-        archivo_adjunto: null,
-        riesgos: nuevosRiesgos,
-        matriz: nuevaMatriz,
-        imagenes_urls: imagenesConUrls
-      };
-
-      await dbService.guardarEquipo(equipoAutoGuardado);
-      setEquipoData(prev => ({ ...prev, id: idDefinitivo }));
-
-      showToast('Análisis técnico completado y guardado en Mis Equipos', 'success');
+      showToast('Pre-análisis completado. Equipo guardado como borrador en Mis Equipos', 'success');
     } catch (error) {
-      let msg = error?.message || '';
-      if (msg.includes('JSON') || msg.includes('Unexpected end') || msg.includes('Failed to execute')) {
-        msg = 'Hubo un problema con el servicio de IA (posiblemente créditos agotados o servicio no disponible). Por favor contacte a soporte.';
-      } else {
-        msg = 'Error en el proceso: ' + msg;
-      }
-      showToast(msg, 'error');
+      showToast(error?.message || 'Ocurrió un error inesperado.', 'error');
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const getNivelBadgeClass = (valor) => {
-    const v = parseInt(valor) || 0;
-    if (v >= 15) return 'bg-red-600 text-white font-bold';
-    if (v >= 9) return 'bg-yellow-400 text-slate-900 font-bold';
-    if (v >= 4) return 'bg-emerald-500 text-white font-bold';
-    return 'bg-slate-200 text-slate-700 font-bold';
+  // Guarda correcciones manuales sin volver a llamar a la IA
+  const handleGuardarCambios = async () => {
+    if (!validarImagenes()) return;
+    if (!equipoData.equipo.trim()) {
+      showToast('Ingresa el nombre del equipo o ejecuta el pre-análisis con IA.', 'error');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const imagenesUrls = await subirImagenesPendientes();
+      await persistirBorrador({
+        equipo: equipoData.equipo.trim(),
+        descripcion_manual: equipoData.descripcion_manual,
+        identificacion: equipoData.identificacion,
+        departamento: equipoData.departamento,
+        imagenes_urls: imagenesUrls
+      });
+      showToast('Borrador guardado correctamente', 'success');
+    } catch (error) {
+      showToast(error?.message || 'Ocurrió un error inesperado.', 'error');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-10 font-body text-slate-800">
-      
+    <div className="max-w-5xl mx-auto px-4 py-10 font-body text-slate-800">
+
       {toast.show && (
-        <div className={`fixed top-5 right-5 z-50 px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${
+        <div className={`fixed top-5 right-5 z-50 max-w-md px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${
           toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
         }`}>
           {toast.type === 'error' ? (
-            <svg className="w-5 h-5 fill-current" viewBox="0 0 20 20">
+            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
             </svg>
           ) : (
-            <svg className="w-5 h-5 fill-current" viewBox="0 0 20 20">
+            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
             </svg>
           )}
@@ -383,51 +264,125 @@ export default function Analisisdatos() {
         </div>
       )}
 
-      {isAnalyzing && (
+      {isBusy && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
           <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-slate-100">
             <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="font-title text-xl font-bold text-[#002060] mb-2">Procesando con IA...</p>
-            <p className="text-sm text-slate-500">Subiendo archivos a la nube y evaluando manual...</p>
+            <p className="font-title text-xl font-bold text-[#002060] mb-2">
+              {isAnalyzing ? 'Pre-analizando con IA...' : 'Guardando borrador...'}
+            </p>
+            <p className="text-sm text-slate-500">
+              {isAnalyzing
+                ? 'Comprimiendo fotos, subiendo a Supabase e identificando el equipo...'
+                : 'Sincronizando imágenes y datos del equipo...'}
+            </p>
           </div>
         </div>
       )}
 
       <div className="bg-[#002060] text-white p-8 rounded-2xl shadow-lg mb-10 text-center">
+        <p className="text-blue-200 text-xs font-bold uppercase tracking-widest mb-2">Fase 1 · Pre-análisis visual</p>
         <h1 className="font-title text-3xl md:text-5xl font-black uppercase tracking-wide mb-2">
-          Análisis de Riesgo de Maquinaria
+          Registro de Equipo
         </h1>
         <p className="text-blue-200 text-base md:text-lg max-w-3xl mx-auto">
-          Captura técnica optimizada con almacenamiento en nube.
+          Sube de 1 a 2 fotografías: la IA identificará el equipo y redactará su descripción técnica.
+          La evaluación de riesgos NOM-004 se realiza después, en lote, desde <span className="font-bold text-white">Mis Equipos</span>.
         </p>
       </div>
 
+      {equipoData.status === EQUIPO_STATUS.COMPLETADO && (
+        <div className="mb-8 p-4 bg-amber-50 border-l-4 border-amber-500 rounded-r-md text-amber-800 text-sm font-medium">
+          Este equipo ya cuenta con análisis de riesgos completo. Si guardas cambios o repites el pre-análisis,
+          volverá a estado <strong>borrador</strong> y deberá analizarse de nuevo.
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 md:p-10 space-y-10">
 
-        {/* 1. SECCIÓN EQUIPO */}
+        {/* 1. EVIDENCIA FOTOGRÁFICA */}
+        <div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-slate-100 pb-3 mb-6">
+            <h2 className="font-title text-2xl font-black text-[#002060] uppercase">
+              1. Evidencia Fotográfica <span className="text-red-500">*</span>
+            </h2>
+            {equipoData.status && (
+              <span className={`text-xs px-2.5 py-1 rounded-md font-bold ${
+                equipoData.status === EQUIPO_STATUS.COMPLETADO
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-amber-100 text-amber-800'
+              }`}>
+                {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
+              </span>
+            )}
+          </div>
+
+          <p className="text-sm text-slate-600 mb-4">
+            Formatos JPG, JPEG o PNG · <span className="font-bold text-blue-700">Mínimo {MIN_IMAGENES}, máximo {MAX_IMAGENES} fotos</span> (comprimidas automáticamente a ≤ 500 KB).
+            Incluye una vista general del equipo y, si es posible, su placa de datos.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-4">
+            <label className={`text-sm font-bold py-2.5 px-5 rounded-lg transition ${
+              imagenesCargadas.length >= MAX_IMAGENES
+                ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'
+                : 'bg-[#002060] hover:bg-[#003087] text-white cursor-pointer'
+            }`}>
+              + Agregar Imágenes
+              <input
+                type="file"
+                multiple
+                accept="image/jpeg,image/jpg,image/png"
+                onChange={handleImagenesChange}
+                disabled={imagenesCargadas.length >= MAX_IMAGENES || isBusy}
+                className="hidden"
+              />
+            </label>
+            <span className="text-xs text-slate-500 font-medium">
+              {imagenesCargadas.length > 0
+                ? `${imagenesCargadas.length} / ${MAX_IMAGENES} foto(s) optimizada(s)`
+                : `Ninguna imagen seleccionada (mín. ${MIN_IMAGENES}, máx. ${MAX_IMAGENES})`}
+            </span>
+          </div>
+
+          {imagenesCargadas.length > 0 && (
+            <div className="flex flex-wrap gap-4 mt-5">
+              {imagenesCargadas.map((img) => (
+                <div key={img.id} className="relative group w-28 h-28 border border-slate-200 rounded-lg overflow-hidden bg-slate-100 shadow-sm">
+                  <img src={img.preview} alt={img.name} className="w-full h-full object-cover" />
+                  {img.url && (
+                    <span className="absolute bottom-1 left-1 bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
+                      En la nube
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeImagen(img.id)}
+                    disabled={isBusy}
+                    className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md hover:bg-red-700 transition"
+                    aria-label={`Quitar ${img.name}`}
+                  >
+                    <svg className="w-3 h-3 fill-current" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 2. DATOS DE REFERENCIA (OPCIONALES) */}
         <div>
           <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            Identificación del Equipo
+            2. Datos de Referencia <span className="text-sm font-semibold text-slate-400 normal-case">(opcionales)</span>
           </h2>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="md:col-span-2">
-              <label className="block font-bold text-slate-800 text-sm mb-1">
-                Nombre del Equipo (Marca y Modelo) <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                name="equipo"
-                value={equipoData.equipo}
-                onChange={handleInputChange}
-                placeholder="Indique marca, modelo o tipo técnico específico"
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-              />
-            </div>
-
             <div>
-              <label className="block font-bold text-slate-800 text-sm mb-1">No. de Identificación / Tag</label>
+              <label htmlFor="identificacion" className="block font-bold text-slate-800 text-sm mb-1">No. de Identificación / Tag</label>
               <input
+                id="identificacion"
                 type="text"
                 name="identificacion"
                 value={equipoData.identificacion}
@@ -438,8 +393,9 @@ export default function Analisisdatos() {
             </div>
 
             <div>
-              <label className="block font-bold text-slate-800 text-sm mb-1">Departamento / Área</label>
+              <label htmlFor="departamento" className="block font-bold text-slate-800 text-sm mb-1">Departamento / Área</label>
               <input
+                id="departamento"
                 type="text"
                 name="departamento"
                 value={equipoData.departamento}
@@ -449,291 +405,75 @@ export default function Analisisdatos() {
               />
             </div>
           </div>
-        </div>
 
-        {/* 2. OPERACIÓN */}
-        <div>
-          <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            Condiciones de Operación
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <div>
-              <label className="block font-bold text-slate-800 text-sm mb-1">No. Operadores expuestos</label>
-              <input
-                type="number"
-                name="operadores"
-                value={equipoData.operadores}
-                onChange={handleInputChange}
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="block font-bold text-slate-800 text-sm mb-1">Días de operación a la semana</label>
-              <div className="flex flex-wrap gap-2 mt-2">
-                {['Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sa'].map((dia) => (
-                  <button
-                    key={dia}
-                    type="button"
-                    onClick={() => handleCheckboxArray('dias', dia)}
-                    className={`px-3.5 py-2 rounded-lg text-sm font-bold border transition ${
-                      equipoData.dias.includes(dia)
-                        ? 'bg-[#002060] text-white border-[#002060]'
-                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
-                    }`}
-                  >
-                    {dia}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block font-bold text-slate-800 text-sm mb-1">Horas por turno (Máx 24)</label>
-              <input
-                type="number"
-                name="horas"
-                max="24"
-                value={equipoData.horas}
-                onChange={handleInputChange}
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-              />
-            </div>
-
-            <div className="md:col-span-4">
-              <label className="block font-bold text-slate-800 text-sm mb-1">Turnos en que opera</label>
-              <div className="flex gap-4 mt-2">
-                {['1', '2', '3'].map((turno) => (
-                  <label key={turno} className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">
-                    <input
-                      type="checkbox"
-                      checked={equipoData.turnos.includes(turno)}
-                      onChange={() => handleCheckboxArray('turnos', turno)}
-                      className="w-4 h-4 accent-[#002060]"
-                    />
-                    <span className="font-bold text-sm text-slate-800">Turno {turno}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+          <div className="mt-8 bg-slate-50 p-6 rounded-xl border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
+            <p className="text-sm text-slate-600 max-w-xl">
+              La IA analizará únicamente las fotografías para proponer el <strong>nombre</strong> y la <strong>descripción técnica</strong>.
+              El equipo se guardará como <strong>borrador</strong>.
+            </p>
+            <button
+              type="button"
+              onClick={handlePreAnalisis}
+              disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+              className="w-full md:w-auto shrink-0 bg-[#003087] hover:bg-[#002060] disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-xl shadow-md transition flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
+              </svg>
+              Pre-análisis con IA (Guarda borrador)
+            </button>
           </div>
         </div>
 
-        {/* 3. DESCRIPCIÓN Y DOCUMENTOS */}
+        {/* 3. RESULTADO DEL PRE-ANÁLISIS (EDITABLE) */}
         <div>
           <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            Descripción y Documentos
+            3. Resultado del Pre-análisis
           </h2>
 
           <div className="space-y-6">
             <div>
-              <label className="block font-bold text-slate-800 text-sm mb-1">Descripción técnica del equipo</label>
-              <textarea
-                name="descripcion_manual"
-                rows={4}
-                value={equipoData.descripcion_manual}
+              <label htmlFor="equipo" className="block font-bold text-slate-800 text-sm mb-1">
+                Nombre del Equipo (Marca y Modelo)
+              </label>
+              <input
+                id="equipo"
+                type="text"
+                name="equipo"
+                value={equipoData.equipo}
                 onChange={handleInputChange}
-                placeholder="La IA redactará la descripción técnica a partir del manual PDF..."
+                placeholder="La IA propondrá el nombre a partir de las fotografías..."
                 className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
               />
             </div>
 
-            <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
-              <div>
-                <label className="block font-bold text-slate-800 text-sm mb-1">Manual / Ficha Técnica (PDF)</label>
-                <div className="flex items-center gap-3 mt-1">
-                  <label className="cursor-pointer bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition">
-                    Seleccionar Archivo
-                    <input
-                      type="file"
-                      accept="application/pdf"
-                      onChange={handleArchivoChange}
-                      className="hidden"
-                    />
-                  </label>
-                  <span className="text-xs font-medium text-slate-600 truncate max-w-[250px]">
-                    {equipoData.archivo_nombre || 'Ningún archivo seleccionado'}
-                  </span>
-                </div>
-              </div>
+            <div>
+              <label htmlFor="descripcion_manual" className="block font-bold text-slate-800 text-sm mb-1">
+                Descripción técnica del equipo
+              </label>
+              <textarea
+                id="descripcion_manual"
+                name="descripcion_manual"
+                rows={5}
+                value={equipoData.descripcion_manual}
+                onChange={handleInputChange}
+                placeholder="La IA redactará la descripción técnica a partir de las fotografías..."
+                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
+              />
+              <p className="text-xs text-slate-500 mt-1.5 italic">
+                Puedes corregir el nombre y la descripción antes del análisis profundo. Esta información será la base para evaluar los riesgos.
+              </p>
+            </div>
 
+            <div className="flex justify-end">
               <button
                 type="button"
-                onClick={handleAnalizarConIA}
-                disabled={isAnalyzing}
-                className="w-full md:w-auto bg-[#003087] hover:bg-[#002060] text-white font-bold py-3 px-8 rounded-xl shadow-md transition flex items-center justify-center gap-2"
+                onClick={handleGuardarCambios}
+                disabled={isBusy}
+                className="w-full md:w-auto bg-white border-2 border-[#002060] text-[#002060] hover:bg-slate-50 disabled:opacity-50 font-bold py-3 px-6 rounded-xl transition"
               >
-                <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
-                </svg>
-                Análisis con IA (Guardado Auto)
+                Guardar cambios del borrador
               </button>
-            </div>
-
-            <div>
-              <label className="block font-bold text-slate-800 text-sm mb-2">
-                Evidencia Fotográfica (jpg, jpeg y png) - <span className="text-blue-700">Máximo 3 fotos</span>
-              </label>
-              <div className="flex items-center gap-4">
-                <label className={`text-xs font-bold py-2 px-4 rounded-lg transition ${
-                  imagenesCargadas.length >= 3 
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60' 
-                    : 'bg-slate-200 hover:bg-slate-300 text-slate-800 cursor-pointer'
-                }`}>
-                  + Agregar Imágenes
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/jpeg,image/jpg,image/png"
-                    onChange={handleImagenesChange}
-                    disabled={imagenesCargadas.length >= 3}
-                    className="hidden"
-                  />
-                </label>
-                <span className="text-xs text-slate-500 font-medium">
-                  {imagenesCargadas.length > 0 ? `${imagenesCargadas.length} / 3 foto(s) optimizada(s)` : 'Ninguna imagen seleccionada (Máx 3)'}
-                </span>
-              </div>
-
-              {imagenesCargadas.length > 0 && (
-                <div className="flex flex-wrap gap-4 mt-4">
-                  {imagenesCargadas.map((img) => (
-                    <div key={img.id} className="relative group w-24 h-24 border border-slate-200 rounded-lg overflow-hidden bg-slate-100 shadow-sm">
-                      <img src={img.preview} alt={img.name} className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => removeImagen(img.id)}
-                        className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md hover:bg-red-700 transition"
-                      >
-                        <svg className="w-3 h-3 fill-current" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                        </svg>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* 4. TABLA DE RIESGOS POTENCIALES */}
-        <div>
-          <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            Riesgo Potencial por Tipo
-          </h2>
-
-          <div className="overflow-x-auto rounded-xl border border-slate-200">
-            <table className="w-full text-left border-collapse text-xs md:text-sm">
-              <thead>
-                <tr className="bg-[#002060] text-white font-title uppercase">
-                  <th className="p-3 w-12 text-center">Inciso</th>
-                  <th className="p-3">Riesgos Potenciales por:</th>
-                  <th className="p-3 w-20 text-center">Presente</th>
-                  <th className="p-3 w-20 text-center">Ausente</th>
-                  <th className="p-3">Observaciones / Medidas de Control</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200">
-                {RIESGOS_BASE.map((item) => {
-                  const state = riesgosState[item.code] || {};
-                  return (
-                    <tr key={item.code} className="hover:bg-slate-50 transition">
-                      <td className="p-3 font-bold text-center text-[#002060] bg-blue-50/50">
-                        {item.code.charAt(0)})
-                      </td>
-                      <td className="p-3 font-bold text-slate-800">{item.name}</td>
-                      <td className="p-3 text-center">
-                        <input
-                          type="checkbox"
-                          checked={state.presente || false}
-                          onChange={(e) => handleRiesgoChange(item.code, 'presente', e.target.checked)}
-                          className="w-5 h-5 accent-[#002060] cursor-pointer"
-                        />
-                      </td>
-                      <td className="p-3 text-center">
-                        <input
-                          type="checkbox"
-                          checked={state.ausente || false}
-                          onChange={(e) => handleRiesgoChange(item.code, 'ausente', e.target.checked)}
-                          className="w-5 h-5 accent-slate-400 cursor-pointer"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <input
-                          type="text"
-                          value={state.observacion || ''}
-                          onChange={(e) => handleRiesgoChange(item.code, 'observacion', e.target.value)}
-                          placeholder={state.ausente ? 'No aplica' : 'Medida de seguridad...'}
-                          className="w-full p-2 border border-slate-200 rounded bg-slate-50 focus:bg-white outline-none"
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* 5. MATRICES DE RIESGO */}
-        <div>
-          <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            Valoración del Riesgo Potencial (Matriz NOM-004)
-          </h2>
-
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            <div className="lg:col-span-7 overflow-x-auto">
-              <table className="w-full text-xs border-collapse border border-slate-800 text-center">
-                <thead>
-                  <tr className="bg-[#002060] text-white font-title">
-                    <th colSpan="6" className="p-2 border border-slate-800 uppercase font-bold text-sm">
-                      Matriz de Valoración
-                    </th>
-                  </tr>
-                  <tr className="bg-slate-100 text-slate-800 font-bold">
-                    <th className="p-2 border border-slate-800">Riesgo</th>
-                    <th className="p-2 border border-slate-800">Tipo de Daño</th>
-                    <th className="p-2 border border-slate-800">Gravedad</th>
-                    <th className="p-2 border border-slate-800">Probabilidad</th>
-                    <th className="p-2 border border-slate-800">Valor</th>
-                    <th className="p-2 border border-slate-800">Nivel</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {matrizState.length > 0 ? (
-                    matrizState.map((row, idx) => (
-                      <tr key={idx} className="border border-slate-800">
-                        <td className="p-2 border border-slate-800 font-bold uppercase">{row.riesgo}</td>
-                        <td className="p-2 border border-slate-800 text-left font-medium">{row.tipo_daño || row.tipo_danio}</td>
-                        <td className="p-2 border border-slate-800 font-bold">{row.gravedad}</td>
-                        <td className="p-2 border border-slate-800 font-bold">{row.probabilidad}</td>
-                        <td className="p-2 border border-slate-800 font-extrabold">{row.valor}</td>
-                        <td className={`p-2 border border-slate-800 ${getNivelBadgeClass(row.valor)}`}>
-                          {row.nivel}
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    Array.from({ length: 4 }).map((_, idx) => (
-                      <tr key={idx} className="border border-slate-300">
-                        <td colSpan="6" className="p-3 text-slate-400 italic text-center">
-                          {idx === 0 ? 'Sin riesgos presentes registrados' : '-'}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-4 flex items-center justify-center min-h-[250px] shadow-sm overflow-hidden">
-              <img 
-                src={diagramaImg} 
-                alt="Diagrama / Matriz NOM-004" 
-                className="w-full h-auto max-h-[350px] object-contain rounded-xl"
-              />
             </div>
           </div>
         </div>
@@ -751,6 +491,7 @@ export default function Analisisdatos() {
             <button
               type="button"
               onClick={handleLimpiarFormulario}
+              disabled={isBusy}
               className="w-full md:w-auto bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold py-3.5 px-6 rounded-xl transition flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
