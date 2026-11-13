@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { preAnalizarEquipo } from '../services/n8nService';
 import { comprimirImagen } from '../utils/imageCompressor';
@@ -17,6 +17,8 @@ const EQUIPO_VACIO = {
   identificacion: '',
   departamento: ''
 };
+
+const ENLACE_DRIVE_REGEX = /^https:\/\/(drive|docs)\.google\.com\/(drive\/(u\/\d+\/)?folders\/|folders\/|file\/d\/|open\?id=)[\w-]+/i;
 
 const TOAST_OCULTO = { show: false, message: '', type: 'success' };
 
@@ -46,6 +48,7 @@ const urlsAImagenes = (urls) =>
 export default function Analisisdatos() {
   const location = useLocation();
   const { userId } = useAuth();
+  const inputNombreRef = useRef(null);
 
   // Si se llega desde "Mis Equipos" con un equipo a editar, se precarga en el estado inicial
   const equipoEditar = location.state?.equipoEditar;
@@ -56,8 +59,10 @@ export default function Analisisdatos() {
   const [imagenesCargadas, setImagenesCargadas] = useState(() =>
     urlsAImagenes(equipoEditar?.imagenes_urls)
   );
+  const [driveLink, setDriveLink] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [modoManualAviso, setModoManualAviso] = useState(null);
   const [toast, setToast] = useState(() =>
     equipoEditar
       ? { show: true, message: `Equipo "${equipoEditar.equipo || 'Sin nombre'}" cargado para edición`, type: 'success' }
@@ -70,10 +75,10 @@ export default function Analisisdatos() {
     setToast({ show: true, message, type });
   };
 
-  // Oculta el toast 4 s después de mostrarse (se reinicia si llega otro mensaje)
+  // Oculta el toast 4.5 s después de mostrarse (se reinicia si llega otro mensaje)
   useEffect(() => {
     if (!toast.show) return;
-    const timer = setTimeout(() => setToast(TOAST_OCULTO), 4000);
+    const timer = setTimeout(() => setToast(TOAST_OCULTO), 4500);
     return () => clearTimeout(timer);
   }, [toast]);
 
@@ -147,6 +152,7 @@ export default function Analisisdatos() {
     imagenesCargadas.forEach(liberarPreview);
     setEquipoData(EQUIPO_VACIO);
     setImagenesCargadas([]);
+    setModoManualAviso(null);
     showToast('Formulario listo para un nuevo equipo', 'success');
   };
 
@@ -181,50 +187,77 @@ export default function Analisisdatos() {
     return true;
   };
 
-  // --- FASE 1: PRE-ANÁLISIS VISUAL CON IA + GUARDADO COMO BORRADOR ---
+  // --- FASE 1: PRE-ANÁLISIS VISUAL CON IA + DEGRADACIÓN ELEGANTE SIN MOCKS ---
   const handlePreAnalisis = async () => {
     if (!validarImagenes()) return;
 
     setIsAnalyzing(true);
+    setModoManualAviso(null);
+
     try {
+      // 1. Subir primero las fotografías a Supabase Storage (esto no depende de n8n)
       const imagenesUrls = await subirImagenesPendientes();
 
-      const resultado = await preAnalizarEquipo({
-        user_id: userId,
-        equipo_id: equipoData.id,
-        identificacion: equipoData.identificacion,
-        departamento: equipoData.departamento,
-        imagenes_urls: imagenesUrls
-      });
+      // 2. Intentar pre-análisis en el Webhook 1 de n8n
+      try {
+        const resultado = await preAnalizarEquipo({
+          user_id: userId,
+          equipo_id: equipoData.id,
+          identificacion: equipoData.identificacion,
+          departamento: equipoData.departamento,
+          imagenes_urls: imagenesUrls
+        });
 
-      const nombre = resultado.nombre_equipo || equipoData.equipo;
-      const descripcion = resultado.descripcion || equipoData.descripcion_manual;
+        const nombre = resultado.nombre_equipo || equipoData.equipo;
+        const descripcion = resultado.descripcion || equipoData.descripcion_manual;
 
-      setEquipoData(prev => ({ ...prev, equipo: nombre, descripcion_manual: descripcion }));
+        setEquipoData(prev => ({ ...prev, equipo: nombre, descripcion_manual: descripcion }));
 
-      await persistirBorrador({
-        equipo: nombre,
-        descripcion_manual: descripcion,
-        identificacion: equipoData.identificacion,
-        departamento: equipoData.departamento,
-        imagenes_urls: imagenesUrls
-      });
+        await persistirBorrador({
+          equipo: nombre,
+          descripcion_manual: descripcion,
+          identificacion: equipoData.identificacion,
+          departamento: equipoData.departamento,
+          imagenes_urls: imagenesUrls
+        });
 
-      showToast('Pre-análisis completado. Equipo guardado como borrador en Mis Equipos', 'success');
-    } catch (error) {
-      showToast(error?.message || 'Ocurrió un error inesperado.', 'error');
+        showToast('Pre-análisis completado. Equipo guardado como borrador en Mis Equipos', 'success');
+      } catch (iaError) {
+        // Degradación elegante (Graceful Degradation):
+        // Si n8n falla (Failed to fetch / ERR_SSL_PROTOCOL_ERROR / 500), NO usamos Mocks falsos
+        // ni perdemos las fotos subidas: guardamos el borrador con los campos actuales (vacíos o escritos)
+        // y habilitamos la captura manual para que el usuario continúe sin bloqueos.
+        console.warn('Pre-análisis IA no disponible, activando modo manual:', iaError);
+
+        await persistirBorrador({
+          equipo: equipoData.equipo.trim(),
+          descripcion_manual: equipoData.descripcion_manual,
+          identificacion: equipoData.identificacion,
+          departamento: equipoData.departamento,
+          imagenes_urls: imagenesUrls
+        });
+
+        setModoManualAviso(
+          'Fotos guardadas. La IA no respondió: escribe el nombre y la descripción manualmente.'
+        );
+
+        showToast(
+          'Fotos guardadas en borrador. IA no disponible temporalmente: completa los datos manualmente.',
+          'warning'
+        );
+
+        setTimeout(() => inputNombreRef.current?.focus(), 100);
+      }
+    } catch (storageOrDbError) {
+      showToast(storageOrDbError?.message || 'Ocurrió un error al guardar las imágenes.', 'error');
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  // Guarda correcciones manuales sin volver a llamar a la IA
+  // Guarda el borrador manualmente sin llamar a la IA
   const handleGuardarCambios = async () => {
     if (!validarImagenes()) return;
-    if (!equipoData.equipo.trim()) {
-      showToast('Ingresa el nombre del equipo o ejecuta el pre-análisis con IA.', 'error');
-      return;
-    }
 
     setIsSaving(true);
     try {
@@ -236,7 +269,8 @@ export default function Analisisdatos() {
         departamento: equipoData.departamento,
         imagenes_urls: imagenesUrls
       });
-      showToast('Borrador guardado correctamente', 'success');
+      setModoManualAviso(null);
+      showToast('Borrador guardado correctamente en Mis Equipos', 'success');
     } catch (error) {
       showToast(error?.message || 'Ocurrió un error inesperado.', 'error');
     } finally {
@@ -244,275 +278,384 @@ export default function Analisisdatos() {
     }
   };
 
+  const toastBgClass =
+    toast.type === 'error'
+      ? 'bg-red-600'
+      : toast.type === 'warning'
+        ? 'bg-amber-600'
+        : toast.type === 'info'
+          ? 'bg-[#002060]'
+          : 'bg-emerald-600';
+
+  // Importación masiva desde Drive: por ahora solo valida el enlace (la lógica de importación aún no está conectada)
+  const handleImportarDrive = (e) => {
+    e.preventDefault();
+    if (!ENLACE_DRIVE_REGEX.test(driveLink.trim())) {
+      showToast('El enlace no parece ser de Google Drive.', 'error');
+      return;
+    }
+    showToast('Enlace válido. La importación desde Drive estará disponible pronto.', 'info');
+  };
+
+  // Estilos "glass" reutilizables
+  const glassCard =
+    'rounded-3xl border border-white/60 bg-white/55 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,32,96,0.08)]';
+  const glassInput =
+    'w-full rounded-xl border border-slate-200/80 bg-white/60 py-3 text-sm text-slate-800 placeholder:text-slate-400 backdrop-blur transition outline-none focus:bg-white/90 focus:border-[#002060]/40 focus:ring-2 focus:ring-[#002060]/20';
+
+  const pasos = [
+    { label: 'Fotos', hecho: imagenesCargadas.length >= MIN_IMAGENES },
+    { label: 'Identificar', hecho: equipoData.equipo.trim().length > 0 },
+    { label: 'Guardado', hecho: Boolean(equipoData.id) }
+  ];
+
+  const ranurasVacias = Math.max(0, MAX_IMAGENES - imagenesCargadas.length);
+  const etiquetasRanura = ['Vista general', 'Detalle'];
+
   return (
-    <div className="max-w-5xl mx-auto px-4 py-10 font-body text-slate-800">
+    <div className="relative isolate overflow-hidden font-body text-slate-800">
 
-      {toast.show && (
-        <div className={`fixed top-5 right-5 z-50 max-w-md px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${
-          toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'
-        }`}>
-          {toast.type === 'error' ? (
-            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-            </svg>
-          ) : (
-            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-            </svg>
-          )}
-          <span>{toast.message}</span>
-        </div>
-      )}
+      {/* Fondo decorativo para que las superficies translúcidas tengan algo que difuminar */}
+      <div aria-hidden="true" className="absolute inset-0 -z-10 bg-linear-to-br from-slate-50 via-blue-50/70 to-indigo-100/60" />
+      <div aria-hidden="true" className="absolute -top-24 -left-24 -z-10 w-96 h-96 rounded-full bg-[#002060]/15 blur-3xl" />
+      <div aria-hidden="true" className="absolute top-1/3 -right-28 -z-10 w-[28rem] h-[28rem] rounded-full bg-sky-400/25 blur-3xl" />
+      <div aria-hidden="true" className="absolute bottom-0 left-1/4 -z-10 w-96 h-96 rounded-full bg-indigo-400/20 blur-3xl" />
 
-      {isBusy && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-slate-100">
-            <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="font-title text-xl font-bold text-[#002060] mb-2">
-              {isAnalyzing ? 'Pre-analizando con IA...' : 'Guardando borrador...'}
-            </p>
-            <p className="text-sm text-slate-500">
-              {isAnalyzing
-                ? 'Comprimiendo fotos, subiendo a Supabase e identificando el equipo...'
-                : 'Sincronizando imágenes y datos del equipo...'}
-            </p>
+      <div className="max-w-5xl mx-auto px-4 py-10">
+
+        {toast.show && (
+          <div className={`fixed top-5 right-5 z-50 max-w-md px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${toastBgClass}`}>
+            <Icon
+              className="w-5 h-5 shrink-0"
+              d={toast.type === 'success' ? 'M4.5 12.75l6 6 9-13.5' : toast.type === 'info' ? 'M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z' : 'M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z'}
+            />
+            <span>{toast.message}</span>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="bg-[#002060] text-white p-8 rounded-2xl shadow-lg mb-10 text-center">
-        <p className="text-blue-200 text-xs font-bold uppercase tracking-widest mb-2">Fase 1 · Pre-análisis visual</p>
-        <h1 className="font-title text-3xl md:text-5xl font-black uppercase tracking-wide mb-2">
-          Registro de Equipo
-        </h1>
-        <p className="text-blue-200 text-base md:text-lg max-w-3xl mx-auto">
-          Sube de 1 a 2 fotografías: la IA identificará el equipo y redactará su descripción técnica.
-          La evaluación de riesgos NOM-004 se realiza después, en lote, desde <span className="font-bold text-white">Mis Equipos</span>.
-        </p>
-      </div>
-
-      {equipoData.status === EQUIPO_STATUS.COMPLETADO && (
-        <div className="mb-8 p-4 bg-amber-50 border-l-4 border-amber-500 rounded-r-md text-amber-800 text-sm font-medium">
-          Este equipo ya cuenta con análisis de riesgos completo. Si guardas cambios o repites el pre-análisis,
-          volverá a estado <strong>borrador</strong> y deberá analizarse de nuevo.
-        </div>
-      )}
-
-      <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-6 md:p-10 space-y-10">
-
-        {/* 1. EVIDENCIA FOTOGRÁFICA */}
-        <div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b-2 border-slate-100 pb-3 mb-6">
-            <h2 className="font-title text-2xl font-black text-[#002060] uppercase">
-              1. Evidencia Fotográfica <span className="text-red-500">*</span>
-            </h2>
-            {equipoData.status && (
-              <span className={`text-xs px-2.5 py-1 rounded-md font-bold ${
-                equipoData.status === EQUIPO_STATUS.COMPLETADO
-                  ? 'bg-emerald-100 text-emerald-800'
-                  : 'bg-amber-100 text-amber-800'
-              }`}>
-                {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
-              </span>
-            )}
+        {isBusy && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-md z-50 flex items-center justify-center">
+            <div className="bg-white/80 backdrop-blur-xl p-8 rounded-3xl shadow-2xl text-center max-w-xs border border-white/60">
+              <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
+              <p className="font-title text-xl font-bold text-[#002060]">
+                {isAnalyzing ? 'Analizando con IA...' : 'Guardando...'}
+              </p>
+            </div>
           </div>
+        )}
 
-          <p className="text-sm text-slate-600 mb-4">
-            Formatos JPG, JPEG o PNG · <span className="font-bold text-blue-700">Mínimo {MIN_IMAGENES}, máximo {MAX_IMAGENES} fotos</span> (comprimidas automáticamente a ≤ 500 KB).
-            Incluye una vista general del equipo y, si es posible, su placa de datos.
-          </p>
+        {/* Encabezado + progreso */}
+        <header className="relative overflow-hidden rounded-3xl bg-[#002060]/90 backdrop-blur-xl text-white px-6 py-8 md:px-10 shadow-lg mb-8">
+          <div aria-hidden="true" className="absolute -right-10 -top-10 w-48 h-48 rounded-full bg-white/10 blur-2xl" />
+          <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+            <div>
+              <p className="text-blue-200 text-[11px] font-bold uppercase tracking-widest mb-1">Fase 1 · Pre-análisis</p>
+              <h1 className="font-title text-3xl md:text-4xl font-black uppercase tracking-wide">Registro de Equipo</h1>
+              <p className="text-blue-100/80 text-sm mt-1">Sube las fotos y la IA identifica el equipo.</p>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-4">
-            <label className={`text-sm font-bold py-2.5 px-5 rounded-lg transition ${
-              imagenesCargadas.length >= MAX_IMAGENES
-                ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'
-                : 'bg-[#002060] hover:bg-[#003087] text-white cursor-pointer'
-            }`}>
-              + Agregar Imágenes
-              <input
-                type="file"
-                multiple
-                accept="image/jpeg,image/jpg,image/png"
-                onChange={handleImagenesChange}
-                disabled={imagenesCargadas.length >= MAX_IMAGENES || isBusy}
-                className="hidden"
-              />
-            </label>
-            <span className="text-xs text-slate-500 font-medium">
-              {imagenesCargadas.length > 0
-                ? `${imagenesCargadas.length} / ${MAX_IMAGENES} foto(s) optimizada(s)`
-                : `Ninguna imagen seleccionada (mín. ${MIN_IMAGENES}, máx. ${MAX_IMAGENES})`}
-            </span>
-          </div>
-
-          {imagenesCargadas.length > 0 && (
-            <div className="flex flex-wrap gap-4 mt-5">
-              {imagenesCargadas.map((img) => (
-                <div key={img.id} className="relative group w-28 h-28 border border-slate-200 rounded-lg overflow-hidden bg-slate-100 shadow-sm">
-                  <img src={img.preview} alt={img.name} className="w-full h-full object-cover" />
-                  {img.url && (
-                    <span className="absolute bottom-1 left-1 bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded">
-                      En la nube
+            <ol className="flex items-center gap-2 self-start md:self-auto">
+              {pasos.map((paso, i) => (
+                <li key={paso.label} className="flex items-center gap-2">
+                  <span
+                    className={`flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-full text-xs font-bold border backdrop-blur transition ${
+                      paso.hecho
+                        ? 'bg-emerald-400/20 border-emerald-300/40 text-emerald-100'
+                        : 'bg-white/10 border-white/20 text-blue-100/80'
+                    }`}
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] ${paso.hecho ? 'bg-emerald-400 text-[#002060]' : 'bg-white/20'}`}>
+                      {paso.hecho ? <Icon className="w-3 h-3" strokeWidth={3} d="M4.5 12.75l6 6 9-13.5" /> : i + 1}
                     </span>
-                  )}
+                    {paso.label}
+                  </span>
+                  {i < pasos.length - 1 && <span className="w-4 h-px bg-white/30 hidden sm:block" />}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </header>
+
+        {equipoData.status === EQUIPO_STATUS.COMPLETADO && (
+          <div className="mb-6 flex items-center gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm font-medium">
+            <Icon className="w-5 h-5 text-amber-600 shrink-0" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            Equipo ya analizado. Si guardas cambios, vuelve a borrador.
+          </div>
+        )}
+
+        {/* IMPORTAR DESDE DRIVE */}
+        <section className={`${glassCard} mb-6 p-6`}>
+          <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-6">
+            <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide shrink-0">
+              <Icon className="w-6 h-6 text-[#002060]/70" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" />
+              Importar desde Drive
+            </h2>
+
+            <form onSubmit={handleImportarDrive} className="flex flex-col sm:flex-row gap-3 flex-1 min-w-0">
+              <div className="relative flex-1 min-w-0">
+                <label htmlFor="drive_link" className="sr-only">Enlace de Google Drive</label>
+                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+                <input
+                  id="drive_link"
+                  type="url"
+                  value={driveLink}
+                  onChange={(e) => setDriveLink(e.target.value)}
+                  placeholder="Pega el enlace de la carpeta de Drive"
+                  className={`${glassInput} pl-11 pr-4`}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isBusy || !driveLink.trim()}
+                className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#002060] text-white text-sm font-bold shadow-md shadow-[#002060]/20 transition hover:bg-[#001040] disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                <Icon className="w-5 h-5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                Importar
+              </button>
+            </form>
+          </div>
+        </section>
+
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+
+          {/* 1. FOTOS */}
+          <section className={`${glassCard} lg:col-span-3 p-6`}>
+            <div className="flex items-center justify-between gap-3 mb-5">
+              <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide">
+                <Icon className="w-6 h-6 text-[#002060]/70" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+                Fotos <span className="text-red-500">*</span>
+              </h2>
+              <div className="flex items-center gap-2">
+                {equipoData.status && (
+                  <span className={`text-[11px] px-2.5 py-1 rounded-full font-bold ${
+                    equipoData.status === EQUIPO_STATUS.COMPLETADO
+                      ? 'bg-emerald-100/80 text-emerald-800'
+                      : 'bg-amber-100/80 text-amber-800'
+                  }`}>
+                    {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
+                  </span>
+                )}
+                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#002060]/10 text-[#002060]">
+                  {imagenesCargadas.length}/{MAX_IMAGENES}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {imagenesCargadas.map((img, i) => (
+                <div key={img.id} className="relative group aspect-square rounded-2xl overflow-hidden border border-white/70 bg-slate-100/60 shadow-sm">
+                  <img src={img.preview} alt={img.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                  <div className="absolute inset-x-0 bottom-0 p-2.5 bg-linear-to-t from-slate-900/60 to-transparent flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-white">{etiquetasRanura[i]}</span>
+                    {img.url && (
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-200">
+                        <Icon className="w-3 h-3" strokeWidth={3} d="M4.5 12.75l6 6 9-13.5" /> Subida
+                      </span>
+                    )}
+                  </div>
                   <button
                     type="button"
                     onClick={() => removeImagen(img.id)}
                     disabled={isBusy}
-                    className="absolute top-1 right-1 bg-red-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow-md hover:bg-red-700 transition"
+                    className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/80 backdrop-blur text-slate-700 hover:bg-red-600 hover:text-white flex items-center justify-center shadow transition"
                     aria-label={`Quitar ${img.name}`}
                   >
-                    <svg className="w-3 h-3 fill-current" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                    </svg>
+                    <Icon className="w-4 h-4" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
                   </button>
                 </div>
               ))}
+
+              {Array.from({ length: ranurasVacias }).map((_, k) => {
+                const indice = imagenesCargadas.length + k;
+                return (
+                  <label
+                    key={`vacia-${indice}`}
+                    className={`aspect-square rounded-2xl border-2 border-dashed flex flex-col items-center justify-center gap-2 text-center transition ${
+                      isBusy
+                        ? 'border-slate-200 bg-white/30 text-slate-300 cursor-not-allowed'
+                        : 'border-[#002060]/25 bg-white/40 text-[#002060]/60 cursor-pointer hover:border-[#002060]/60 hover:bg-white/70 hover:text-[#002060]'
+                    }`}
+                  >
+                    <span className="w-11 h-11 rounded-full bg-[#002060]/10 flex items-center justify-center">
+                      <Icon className="w-6 h-6" d="M12 4.5v15m7.5-7.5h-15" />
+                    </span>
+                    <span className="text-xs font-bold">{etiquetasRanura[indice]}</span>
+                    <span className="text-[10px] font-medium opacity-70">{indice === 0 ? 'Requerida' : 'Opcional'}</span>
+                    <input
+                      type="file"
+                      multiple
+                      accept="image/jpeg,image/jpg,image/png"
+                      onChange={handleImagenesChange}
+                      disabled={isBusy}
+                      className="hidden"
+                    />
+                  </label>
+                );
+              })}
+            </div>
+
+            <p className="mt-4 text-[11px] text-slate-500 text-center">JPG · PNG · se optimizan automáticamente</p>
+          </section>
+
+          {/* 2. REFERENCIA + IA */}
+          <section className={`${glassCard} lg:col-span-2 p-6 flex flex-col`}>
+            <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
+              <Icon className="w-6 h-6 text-[#002060]/70" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+              Referencia
+              <span className="text-[11px] font-semibold text-slate-400 normal-case tracking-normal">opcional</span>
+            </h2>
+
+            <div className="space-y-4">
+              <div className="relative">
+                <label htmlFor="identificacion" className="sr-only">No. de Identificación / Tag</label>
+                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+                <input
+                  id="identificacion"
+                  type="text"
+                  name="identificacion"
+                  value={equipoData.identificacion}
+                  onChange={handleInputChange}
+                  placeholder="Tag / No. de inventario"
+                  className={`${glassInput} pl-11 pr-4`}
+                />
+              </div>
+
+              <div className="relative">
+                <label htmlFor="departamento" className="sr-only">Departamento / Área</label>
+                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                <input
+                  id="departamento"
+                  type="text"
+                  name="departamento"
+                  value={equipoData.departamento}
+                  onChange={handleInputChange}
+                  placeholder="Departamento / Área"
+                  className={`${glassInput} pl-11 pr-4`}
+                />
+              </div>
+            </div>
+
+            <div className="mt-auto pt-6">
+              <button
+                type="button"
+                onClick={handlePreAnalisis}
+                disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-linear-to-r from-[#002060] to-[#1d4ed8] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:shadow-xl hover:-translate-y-0.5 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+              >
+                <Icon className="w-5 h-5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
+                Identificar con IA
+              </button>
+              <p className="mt-2 text-[11px] text-slate-500 text-center">Guarda un borrador automáticamente</p>
+            </div>
+          </section>
+        </div>
+
+        {/* 3. NOMBRE Y DESCRIPCIÓN */}
+        <section className={`${glassCard} mt-6 p-6`}>
+          <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
+            <Icon className="w-6 h-6 text-[#002060]/70" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+            Equipo
+          </h2>
+
+          {modoManualAviso && (
+            <div className="mb-5 flex items-start gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm">
+              <Icon className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              <p>{modoManualAviso}</p>
             </div>
           )}
-        </div>
 
-        {/* 2. DATOS DE REFERENCIA (OPCIONALES) */}
-        <div>
-          <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            2. Datos de Referencia <span className="text-sm font-semibold text-slate-400 normal-case">(opcionales)</span>
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-4">
             <div>
-              <label htmlFor="identificacion" className="block font-bold text-slate-800 text-sm mb-1">No. de Identificación / Tag</label>
+              <label htmlFor="equipo" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Nombre</label>
               <input
-                id="identificacion"
-                type="text"
-                name="identificacion"
-                value={equipoData.identificacion}
-                onChange={handleInputChange}
-                placeholder="Número interno de inventario"
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="departamento" className="block font-bold text-slate-800 text-sm mb-1">Departamento / Área</label>
-              <input
-                id="departamento"
-                type="text"
-                name="departamento"
-                value={equipoData.departamento}
-                onChange={handleInputChange}
-                placeholder="Ubicación física"
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="mt-8 bg-slate-50 p-6 rounded-xl border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-4">
-            <p className="text-sm text-slate-600 max-w-xl">
-              La IA analizará únicamente las fotografías para proponer el <strong>nombre</strong> y la <strong>descripción técnica</strong>.
-              El equipo se guardará como <strong>borrador</strong>.
-            </p>
-            <button
-              type="button"
-              onClick={handlePreAnalisis}
-              disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
-              className="w-full md:w-auto shrink-0 bg-[#003087] hover:bg-[#002060] disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 px-8 rounded-xl shadow-md transition flex items-center justify-center gap-2"
-            >
-              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
-              </svg>
-              Pre-análisis con IA (Guarda borrador)
-            </button>
-          </div>
-        </div>
-
-        {/* 3. RESULTADO DEL PRE-ANÁLISIS (EDITABLE) */}
-        <div>
-          <h2 className="font-title text-2xl font-black text-[#002060] uppercase border-b-2 border-slate-100 pb-3 mb-6">
-            3. Resultado del Pre-análisis
-          </h2>
-
-          <div className="space-y-6">
-            <div>
-              <label htmlFor="equipo" className="block font-bold text-slate-800 text-sm mb-1">
-                Nombre del Equipo (Marca y Modelo)
-              </label>
-              <input
+                ref={inputNombreRef}
                 id="equipo"
                 type="text"
                 name="equipo"
                 value={equipoData.equipo}
                 onChange={handleInputChange}
-                placeholder="La IA propondrá el nombre a partir de las fotografías..."
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
+                placeholder="Marca y modelo · Ej. Torno Paralelo"
+                className={`${glassInput} px-4`}
               />
             </div>
 
             <div>
-              <label htmlFor="descripcion_manual" className="block font-bold text-slate-800 text-sm mb-1">
-                Descripción técnica del equipo
-              </label>
+              <label htmlFor="descripcion_manual" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Descripción</label>
               <textarea
                 id="descripcion_manual"
                 name="descripcion_manual"
-                rows={5}
+                rows={4}
                 value={equipoData.descripcion_manual}
                 onChange={handleInputChange}
-                placeholder="La IA redactará la descripción técnica a partir de las fotografías..."
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
+                placeholder="Funcionamiento, partes móviles, fuentes de energía..."
+                className={`${glassInput} px-4 resize-none`}
               />
-              <p className="text-xs text-slate-500 mt-1.5 italic">
-                Puedes corregir el nombre y la descripción antes del análisis profundo. Esta información será la base para evaluar los riesgos.
-              </p>
             </div>
 
             <div className="flex justify-end">
               <button
                 type="button"
                 onClick={handleGuardarCambios}
-                disabled={isBusy}
-                className="w-full md:w-auto bg-white border-2 border-[#002060] text-[#002060] hover:bg-slate-50 disabled:opacity-50 font-bold py-3 px-6 rounded-xl transition"
+                disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-[#002060]/30 bg-white/50 backdrop-blur text-[#002060] font-bold transition hover:bg-white/90 hover:border-[#002060]/60 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Guardar cambios del borrador
+                <Icon className="w-5 h-5" d="M4.5 12.75l6 6 9-13.5" />
+                Guardar borrador
               </button>
             </div>
           </div>
-        </div>
+        </section>
 
-        {/* ACCIONES DEL PIE DE PÁGINA */}
-        <div className="pt-8 border-t border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
-          <Link className="w-full md:w-auto bg-slate-600 hover:bg-slate-700 text-white font-bold py-3.5 px-8 rounded-xl text-center transition flex items-center justify-center gap-2" to="/formulario">
-            <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
-            </svg>
-            Atrás (Datos Empresa)
+        {/* ACCIONES */}
+        <footer className="mt-8 flex flex-col-reverse md:flex-row md:items-center md:justify-between gap-3">
+          <Link
+            to="/formulario"
+            className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-white/70 bg-white/50 backdrop-blur text-slate-700 font-bold transition hover:bg-white/90"
+          >
+            <Icon className="w-5 h-5" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+            Atrás
           </Link>
 
-          <div className="flex flex-col md:flex-row gap-4 w-full md:w-auto">
+          <div className="flex flex-col md:flex-row gap-3">
             <button
               type="button"
               onClick={handleLimpiarFormulario}
               disabled={isBusy}
-              className="w-full md:w-auto bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold py-3.5 px-6 rounded-xl transition flex items-center justify-center gap-2"
+              className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-white/70 bg-white/50 backdrop-blur text-slate-700 font-bold transition hover:bg-white/90 disabled:opacity-50"
             >
-              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-              </svg>
-              Limpiar / Capturar Otro
+              <Icon className="w-5 h-5" d="M12 4.5v15m7.5-7.5h-15" />
+              Nuevo equipo
             </button>
 
             <Link
               to="/mis-equipos"
-              className="w-full md:w-auto bg-[#002060] hover:bg-[#001040] text-white font-bold py-3.5 px-8 rounded-xl shadow transition flex items-center justify-center gap-2"
+              className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-[#002060] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:bg-[#001040] hover:-translate-y-0.5"
             >
-              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-              </svg>
-              Ver Mis Equipos
+              <Icon className="w-5 h-5" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+              Mis equipos
             </Link>
           </div>
-        </div>
+        </footer>
 
       </div>
     </div>
+  );
+}
+
+// Ícono de trazo (estilo Heroicons outline) para no depender de librerías externas
+function Icon({ d, className = 'w-5 h-5', strokeWidth = 1.75 }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path d={d} />
+    </svg>
   );
 }
