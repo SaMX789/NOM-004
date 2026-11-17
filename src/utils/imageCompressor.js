@@ -1,44 +1,23 @@
-export const comprimirImagen = (file, maxWidth = 1280, quality = 0.75) => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target.result;
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let width = img.width;
-        let height = img.height;
+import imageCompression from 'browser-image-compression';
 
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
-        }
+export const OPCIONES_COMPRESION = {
+  maxSizeMB: 0.5,          // Máximo 500 KB por foto para cuidar el 1 GB de Supabase Storage
+  maxWidthOrHeight: 1280,  // Redimensiona manteniendo proporción
+  useWebWorker: true,
+  fileType: 'image/jpeg',
+  initialQuality: 0.75
+};
 
-        canvas.width = width;
-        canvas.height = height;
-
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-
-        canvas.toBlob(
-          (blob) => {
-            if (blob) {
-              const compressedFile = new File([blob], file.name.replace(/\.[^/.]+$/, "") + ".jpg", {
-                type: 'image/jpeg',
-                lastModified: Date.now(),
-              });
-              resolve(compressedFile);
-            } else {
-              reject(new Error("Error al comprimir la imagen"));
-            }
-          },
-          'image/jpeg',
-          quality
-        );
-      };
-      img.onerror = (err) => reject(err);
-    };
-    reader.onerror = (err) => reject(err);
+/**
+ * Comprime una imagen en el navegador usando browser-image-compression (máx. 0.5 MB).
+ * @param {File} file
+ * @returns {Promise<File>}
+ */
+export const comprimirImagen = async (file) => {
+  const blobComprimido = await imageCompression(file, OPCIONES_COMPRESION);
+  const nombreBase = (file.name || 'equipo').replace(/\.[^/.]+$/, '');
+  return new File([blobComprimido], `${nombreBase}.jpg`, {
+    type: 'image/jpeg',
+    lastModified: Date.now()
   });
 };
