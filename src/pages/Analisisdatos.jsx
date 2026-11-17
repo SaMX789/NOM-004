@@ -383,228 +383,257 @@ export default function Analisisdatos() {
           </div>
         )}
 
-        {/* IMPORTAR DESDE DRIVE */}
-        <section className={`${glassCard} mb-6 p-6`}>
-          <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-6">
-            <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide shrink-0">
-              <Icon className="w-6 h-6 text-[#002060]/70" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" />
-              Importar desde Drive
-            </h2>
-
-            <form onSubmit={handleImportarDrive} className="flex flex-col sm:flex-row gap-3 flex-1 min-w-0">
-              <div className="relative flex-1 min-w-0">
-                <label htmlFor="drive_link" className="sr-only">Enlace de Google Drive</label>
-                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
-                <input
-                  id="drive_link"
-                  type="url"
-                  value={driveLink}
-                  onChange={(e) => setDriveLink(e.target.value)}
-                  placeholder="Pega el enlace de la carpeta de Drive"
-                  className={`${glassInput} pl-11 pr-4`}
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={isBusy || !driveLink.trim()}
-                className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#002060] text-white text-sm font-bold shadow-md shadow-[#002060]/20 transition hover:bg-[#001040] disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed whitespace-nowrap"
-              >
-                <Icon className="w-5 h-5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                Importar
-              </button>
-            </form>
+        {/* ZONA A · SUBIDA RÁPIDA (lote desde Drive) */}
+        <div className="rounded-[2rem] border border-sky-200/60 bg-sky-100/30 backdrop-blur-sm p-4 md:p-5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 px-1">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-sky-700 bg-sky-100/80 border border-sky-200/70 px-3 py-1 rounded-full">
+              <Icon className="w-3.5 h-3.5" strokeWidth={2.25} d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+              Subida rápida
+            </span>
+            <span className="text-xs text-slate-500">Muchos equipos a la vez</span>
           </div>
-        </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-
-          {/* 1. FOTOS */}
-          <section className={`${glassCard} lg:col-span-3 p-6`}>
-            <div className="flex items-center justify-between gap-3 mb-5">
-              <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide">
-                <Icon className="w-6 h-6 text-[#002060]/70" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
-                Fotos <span className="text-red-500">*</span>
+          <section className={`${glassCard} p-6`}>
+            <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-6">
+              <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide shrink-0">
+                <Icon className="w-6 h-6 text-[#002060]/70" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" />
+                Importar desde Drive
               </h2>
-              <div className="flex items-center gap-2">
-                {equipoData.status && (
-                  <span className={`text-[11px] px-2.5 py-1 rounded-full font-bold ${
-                    equipoData.status === EQUIPO_STATUS.COMPLETADO
-                      ? 'bg-emerald-100/80 text-emerald-800'
-                      : 'bg-amber-100/80 text-amber-800'
-                  }`}>
-                    {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
-                  </span>
-                )}
-                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#002060]/10 text-[#002060]">
-                  {imagenesCargadas.length}/{MAX_IMAGENES}
-                </span>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              {imagenesCargadas.map((img, i) => (
-                <div key={img.id} className="relative group aspect-square rounded-2xl overflow-hidden border border-white/70 bg-slate-100/60 shadow-sm">
-                  <img src={img.preview} alt={img.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
-                  <div className="absolute inset-x-0 bottom-0 p-2.5 bg-linear-to-t from-slate-900/60 to-transparent flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-white">{etiquetasRanura[i]}</span>
-                    {img.url && (
-                      <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-200">
-                        <Icon className="w-3 h-3" strokeWidth={3} d="M4.5 12.75l6 6 9-13.5" /> Subida
-                      </span>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeImagen(img.id)}
-                    disabled={isBusy}
-                    className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/80 backdrop-blur text-slate-700 hover:bg-red-600 hover:text-white flex items-center justify-center shadow transition"
-                    aria-label={`Quitar ${img.name}`}
-                  >
-                    <Icon className="w-4 h-4" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                  </button>
+              <form onSubmit={handleImportarDrive} className="flex flex-col sm:flex-row gap-3 flex-1 min-w-0">
+                <div className="relative flex-1 min-w-0">
+                  <label htmlFor="drive_link" className="sr-only">Enlace de Google Drive</label>
+                  <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" />
+                  <input
+                    id="drive_link"
+                    type="url"
+                    value={driveLink}
+                    onChange={(e) => setDriveLink(e.target.value)}
+                    placeholder="Pega el enlace de la carpeta de Drive"
+                    className={`${glassInput} pl-11 pr-4`}
+                  />
                 </div>
-              ))}
-
-              {Array.from({ length: ranurasVacias }).map((_, k) => {
-                const indice = imagenesCargadas.length + k;
-                return (
-                  <label
-                    key={`vacia-${indice}`}
-                    className={`aspect-square rounded-2xl border-2 border-dashed flex flex-col items-center justify-center gap-2 text-center transition ${
-                      isBusy
-                        ? 'border-slate-200 bg-white/30 text-slate-300 cursor-not-allowed'
-                        : 'border-[#002060]/25 bg-white/40 text-[#002060]/60 cursor-pointer hover:border-[#002060]/60 hover:bg-white/70 hover:text-[#002060]'
-                    }`}
-                  >
-                    <span className="w-11 h-11 rounded-full bg-[#002060]/10 flex items-center justify-center">
-                      <Icon className="w-6 h-6" d="M12 4.5v15m7.5-7.5h-15" />
-                    </span>
-                    <span className="text-xs font-bold">{etiquetasRanura[indice]}</span>
-                    <span className="text-[10px] font-medium opacity-70">{indice === 0 ? 'Requerida' : 'Opcional'}</span>
-                    <input
-                      type="file"
-                      multiple
-                      accept="image/jpeg,image/jpg,image/png"
-                      onChange={handleImagenesChange}
-                      disabled={isBusy}
-                      className="hidden"
-                    />
-                  </label>
-                );
-              })}
-            </div>
-
-            <p className="mt-4 text-[11px] text-slate-500 text-center">JPG · PNG · se optimizan automáticamente</p>
-          </section>
-
-          {/* 2. REFERENCIA + IA */}
-          <section className={`${glassCard} lg:col-span-2 p-6 flex flex-col`}>
-            <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
-              <Icon className="w-6 h-6 text-[#002060]/70" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
-              Referencia
-              <span className="text-[11px] font-semibold text-slate-400 normal-case tracking-normal">opcional</span>
-            </h2>
-
-            <div className="space-y-4">
-              <div className="relative">
-                <label htmlFor="identificacion" className="sr-only">No. de Identificación / Tag</label>
-                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
-                <input
-                  id="identificacion"
-                  type="text"
-                  name="identificacion"
-                  value={equipoData.identificacion}
-                  onChange={handleInputChange}
-                  placeholder="Tag / No. de inventario"
-                  className={`${glassInput} pl-11 pr-4`}
-                />
-              </div>
-
-              <div className="relative">
-                <label htmlFor="departamento" className="sr-only">Departamento / Área</label>
-                <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
-                <input
-                  id="departamento"
-                  type="text"
-                  name="departamento"
-                  value={equipoData.departamento}
-                  onChange={handleInputChange}
-                  placeholder="Departamento / Área"
-                  className={`${glassInput} pl-11 pr-4`}
-                />
-              </div>
-            </div>
-
-            <div className="mt-auto pt-6">
-              <button
-                type="button"
-                onClick={handlePreAnalisis}
-                disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
-                className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-linear-to-r from-[#002060] to-[#1d4ed8] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:shadow-xl hover:-translate-y-0.5 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
-              >
-                <Icon className="w-5 h-5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
-                Identificar con IA
-              </button>
-              <p className="mt-2 text-[11px] text-slate-500 text-center">Guarda un borrador automáticamente</p>
+                <button
+                  type="submit"
+                  disabled={isBusy || !driveLink.trim()}
+                  className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#002060] text-white text-sm font-bold shadow-md shadow-[#002060]/20 transition hover:bg-[#001040] disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  <Icon className="w-5 h-5" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  Importar
+                </button>
+              </form>
             </div>
           </section>
         </div>
 
-        {/* 3. NOMBRE Y DESCRIPCIÓN */}
-        <section className={`${glassCard} mt-6 p-6`}>
-          <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
-            <Icon className="w-6 h-6 text-[#002060]/70" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
-            Equipo
-          </h2>
+        {/* Separador */}
+        <div className="flex items-center gap-4 my-5 px-4" aria-hidden="true">
+          <span className="flex-1 h-px bg-linear-to-r from-transparent via-slate-300/70 to-slate-300/70" />
+          <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">o</span>
+          <span className="flex-1 h-px bg-linear-to-l from-transparent via-slate-300/70 to-slate-300/70" />
+        </div>
 
-          {modoManualAviso && (
-            <div className="mb-5 flex items-start gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm">
-              <Icon className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-              <p>{modoManualAviso}</p>
-            </div>
-          )}
-
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="equipo" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Nombre</label>
-              <input
-                ref={inputNombreRef}
-                id="equipo"
-                type="text"
-                name="equipo"
-                value={equipoData.equipo}
-                onChange={handleInputChange}
-                placeholder="Marca y modelo · Ej. Torno Paralelo"
-                className={`${glassInput} px-4`}
-              />
-            </div>
-
-            <div>
-              <label htmlFor="descripcion_manual" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Descripción</label>
-              <textarea
-                id="descripcion_manual"
-                name="descripcion_manual"
-                rows={4}
-                value={equipoData.descripcion_manual}
-                onChange={handleInputChange}
-                placeholder="Funcionamiento, partes móviles, fuentes de energía..."
-                className={`${glassInput} px-4 resize-none`}
-              />
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={handleGuardarCambios}
-                disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
-                className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-[#002060]/30 bg-white/50 backdrop-blur text-[#002060] font-bold transition hover:bg-white/90 hover:border-[#002060]/60 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Icon className="w-5 h-5" d="M4.5 12.75l6 6 9-13.5" />
-                Guardar borrador
-              </button>
-            </div>
+        {/* ZONA B · REGISTRO 1 POR 1 */}
+        <div className="rounded-[2rem] border border-white/60 bg-white/25 backdrop-blur-sm p-4 md:p-5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 px-1">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[#002060] bg-[#002060]/10 border border-[#002060]/15 px-3 py-1 rounded-full">
+              <Icon className="w-3.5 h-3.5" strokeWidth={2.25} d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+              1 por 1
+            </span>
+            <span className="text-xs text-slate-500">Un equipo a la vez</span>
           </div>
-        </section>
+
+          <div className="space-y-5">
+
+            {/* 1. FOTOS + ANALIZAR CON IA */}
+            <section className={`${glassCard} p-6`}>
+              <div className="flex items-center justify-between gap-3 mb-5">
+                <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide">
+                  <Icon className="w-6 h-6 text-[#002060]/70" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+                  Fotos <span className="text-red-500">*</span>
+                </h2>
+                <div className="flex items-center gap-2">
+                  {equipoData.status && (
+                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-bold ${
+                      equipoData.status === EQUIPO_STATUS.COMPLETADO
+                        ? 'bg-emerald-100/80 text-emerald-800'
+                        : 'bg-amber-100/80 text-amber-800'
+                    }`}>
+                      {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
+                    </span>
+                  )}
+                  <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#002060]/10 text-[#002060]">
+                    {imagenesCargadas.length}/{MAX_IMAGENES}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                {imagenesCargadas.map((img, i) => (
+                  <div key={img.id} className="relative group aspect-[4/3] rounded-2xl overflow-hidden border border-white/70 bg-slate-100/60 shadow-sm">
+                    <img src={img.preview} alt={img.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                    <div className="absolute inset-x-0 bottom-0 p-2.5 bg-linear-to-t from-slate-900/60 to-transparent flex items-center justify-between">
+                      <span className="text-[11px] font-semibold text-white">{etiquetasRanura[i]}</span>
+                      {img.url && (
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-200">
+                          <Icon className="w-3 h-3" strokeWidth={3} d="M4.5 12.75l6 6 9-13.5" /> Subida
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeImagen(img.id)}
+                      disabled={isBusy}
+                      className="absolute top-2 right-2 w-7 h-7 rounded-full bg-white/80 backdrop-blur text-slate-700 hover:bg-red-600 hover:text-white flex items-center justify-center shadow transition"
+                      aria-label={`Quitar ${img.name}`}
+                    >
+                      <Icon className="w-4 h-4" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                    </button>
+                  </div>
+                ))}
+
+                {Array.from({ length: ranurasVacias }).map((_, k) => {
+                  const indice = imagenesCargadas.length + k;
+                  return (
+                    <label
+                      key={`vacia-${indice}`}
+                      className={`aspect-[4/3] rounded-2xl border-2 border-dashed flex flex-col items-center justify-center gap-2 text-center transition ${
+                        isBusy
+                          ? 'border-slate-200 bg-white/30 text-slate-300 cursor-not-allowed'
+                          : 'border-[#002060]/25 bg-white/40 text-[#002060]/60 cursor-pointer hover:border-[#002060]/60 hover:bg-white/70 hover:text-[#002060]'
+                      }`}
+                    >
+                      <span className="w-11 h-11 rounded-full bg-[#002060]/10 flex items-center justify-center">
+                        <Icon className="w-6 h-6" d="M12 4.5v15m7.5-7.5h-15" />
+                      </span>
+                      <span className="text-xs font-bold">{etiquetasRanura[indice]}</span>
+                      <span className="text-[10px] font-medium opacity-70">{indice === 0 ? 'Requerida' : 'Opcional'}</span>
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/jpeg,image/jpg,image/png"
+                        onChange={handleImagenesChange}
+                        disabled={isBusy}
+                        className="hidden"
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+
+              <p className="mt-4 text-[11px] text-slate-500 text-center">JPG · PNG · se optimizan automáticamente</p>
+
+              <div className="mt-5">
+                <button
+                  type="button"
+                  onClick={handlePreAnalisis}
+                  disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                  className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-linear-to-r from-[#002060] to-[#1d4ed8] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:shadow-xl hover:-translate-y-0.5 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
+                >
+                  <Icon className="w-5 h-5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
+                  Analizar con IA
+                </button>
+                <p className="mt-2 text-[11px] text-slate-500 text-center">Guarda un borrador automáticamente</p>
+              </div>
+            </section>
+
+            {/* 2. REFERENCIA (OPCIONAL) */}
+            <section className={`${glassCard} p-6`}>
+              <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
+                <Icon className="w-6 h-6 text-[#002060]/70" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+                Referencia
+                <span className="text-[11px] font-semibold text-slate-400 normal-case tracking-normal">opcional</span>
+              </h2>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="relative">
+                  <label htmlFor="identificacion" className="sr-only">No. de Identificación / Tag</label>
+                  <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+                  <input
+                    id="identificacion"
+                    type="text"
+                    name="identificacion"
+                    value={equipoData.identificacion}
+                    onChange={handleInputChange}
+                    placeholder="Tag / No. de inventario"
+                    className={`${glassInput} pl-11 pr-4`}
+                  />
+                </div>
+
+                <div className="relative">
+                  <label htmlFor="departamento" className="sr-only">Departamento / Área</label>
+                  <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                  <input
+                    id="departamento"
+                    type="text"
+                    name="departamento"
+                    value={equipoData.departamento}
+                    onChange={handleInputChange}
+                    placeholder="Departamento / Área"
+                    className={`${glassInput} pl-11 pr-4`}
+                  />
+                </div>
+              </div>
+            </section>
+
+            {/* 3. NOMBRE Y DESCRIPCIÓN */}
+            <section className={`${glassCard} p-6`}>
+              <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
+                <Icon className="w-6 h-6 text-[#002060]/70" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                Equipo
+              </h2>
+
+              {modoManualAviso && (
+                <div className="mb-5 flex items-start gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm">
+                  <Icon className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                  <p>{modoManualAviso}</p>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="equipo" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Nombre</label>
+                  <input
+                    ref={inputNombreRef}
+                    id="equipo"
+                    type="text"
+                    name="equipo"
+                    value={equipoData.equipo}
+                    onChange={handleInputChange}
+                    placeholder="Marca y modelo · Ej. Torno Paralelo"
+                    className={`${glassInput} px-4`}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="descripcion_manual" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Descripción</label>
+                  <textarea
+                    id="descripcion_manual"
+                    name="descripcion_manual"
+                    rows={4}
+                    value={equipoData.descripcion_manual}
+                    onChange={handleInputChange}
+                    placeholder="Funcionamiento, partes móviles, fuentes de energía..."
+                    className={`${glassInput} px-4 resize-none`}
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleGuardarCambios}
+                    disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                    className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-[#002060]/30 bg-white/50 backdrop-blur text-[#002060] font-bold transition hover:bg-white/90 hover:border-[#002060]/60 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Icon className="w-5 h-5" d="M4.5 12.75l6 6 9-13.5" />
+                    Guardar borrador
+                  </button>
+                </div>
+              </div>
+            </section>
+
+          </div>
+        </div>
 
         {/* ACCIONES */}
         <footer className="mt-8 flex flex-col-reverse md:flex-row md:items-center md:justify-between gap-3">

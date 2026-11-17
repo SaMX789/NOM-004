@@ -1,112 +1,80 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../services/supabaseClient';
 
 const DATOS_CONSULTORIA = "AS CONSULTORIA INTEGRAL Paseo de los cafetos 2830 Fraccionamiento C.P. 45188 Tabachines Zapopan Jalisco México";
 
-/* ============================================================
- * MOCKS (solo visual) — se reemplazarán por datos de Supabase
- * ============================================================ */
-
-// Genera un logotipo SVG de ejemplo (data URI) para previsualizar el diseño
-const mockLogo = (texto, fondo) =>
-  `data:image/svg+xml;utf8,${encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
-      <rect width="96" height="96" rx="18" fill="${fondo}"/>
-      <text x="48" y="58" font-family="Arial, sans-serif" font-size="32" font-weight="700" fill="#fff" text-anchor="middle">${texto}</text>
-    </svg>`
-  )}`;
+// Los logotipos se guardan en el bucket público existente, dentro de la carpeta del usuario
+// (las políticas RLS del bucket exigen que el primer segmento de la ruta sea el user_id)
+const BUCKET_LOGOS = 'equipos-fotos';
+const MAX_LOGO_BYTES = 2 * 1024 * 1024;
 
 const FORM_VACIO = {
-  company_name: '',
-  company_address: '',
-  company_rfc: '',
-  company_activity: '',
-  total_workers: '',
-  work_schedule: '',
-  elaborated_by: DATOS_CONSULTORIA,
-  specialist_name: '',
-  stps_register: '',
-  company_logo: null
+  razon_social: '',
+  domicilio: '',
+  rfc: '',
+  rama_industrial: '',
+  num_trabajadores: '',
+  turnos_horarios: '',
+  elaborado_por: DATOS_CONSULTORIA,
+  especialista_ing: '',
+  registro_stps: '',
+  logo_url: null
 };
 
-const CLIENTES_MOCK = [
-  {
-    id: 'cli-001',
-    company_name: 'VITAE LABORATORIOS S.A. DE C.V.',
-    company_address: 'Av. Industrial No. 105, Col. Parque Industrial, C.P. 44100, Guadalajara, Jalisco.',
-    company_rfc: 'VLA920415H88',
-    company_activity: 'Fabricación y empaque de productos farmacéuticos.',
-    total_workers: '45',
-    work_schedule: '2 turnos de 8 horas (Lunes a Sábado de 06:00 a 22:00 hrs)',
-    elaborated_by: DATOS_CONSULTORIA,
-    specialist_name: 'Ing. Carlos Mendoza Reyes',
-    stps_register: 'STPS-AS-0199/18',
-    company_logo: mockLogo('VL', '#0f766e'),
-    estudios: [
-      { id: 'est-001', fecha: '2026-11-10', estado: 'borrador' },
-      { id: 'est-002', fecha: '2026-03-18', estado: 'completado' }
-    ]
-  },
-  {
-    id: 'cli-002',
-    company_name: 'METALMECÁNICA DEL BAJÍO S.A. DE C.V.',
-    company_address: 'Blvd. Aeropuerto Km 4.5, C.P. 37545, León, Guanajuato.',
-    company_rfc: 'MBA050912KT3',
-    company_activity: 'Maquinado y soldadura de piezas metálicas industriales.',
-    total_workers: '120',
-    work_schedule: '3 turnos de 8 horas (Lunes a Viernes)',
-    elaborated_by: DATOS_CONSULTORIA,
-    specialist_name: 'Ing. Laura Beltrán Soto',
-    stps_register: 'STPS-AS-0245/20',
-    company_logo: mockLogo('MB', '#b45309'),
-    estudios: [
-      { id: 'est-003', fecha: '2026-10-22', estado: 'completado' },
-      { id: 'est-004', fecha: '2026-09-05', estado: 'completado' },
-      { id: 'est-005', fecha: '2026-11-12', estado: 'borrador' }
-    ]
-  },
-  {
-    id: 'cli-003',
-    company_name: 'ALIMENTOS LA CAMPIÑA S.A.',
-    company_address: 'Carretera a Nogales Km 12, C.P. 45200, Zapopan, Jalisco.',
-    company_rfc: 'ACA110203QW9',
-    company_activity: 'Procesamiento y envasado de alimentos.',
-    total_workers: '78',
-    work_schedule: '2 turnos de 10 horas',
-    elaborated_by: DATOS_CONSULTORIA,
-    specialist_name: 'Ing. Carlos Mendoza Reyes',
-    stps_register: 'STPS-AS-0199/18',
-    company_logo: null,
-    estudios: [{ id: 'est-006', fecha: '2026-11-01', estado: 'borrador' }]
-  },
-  {
-    id: 'cli-004',
-    company_name: 'PLÁSTICOS TÉCNICOS DE OCCIDENTE S.A. DE C.V.',
-    company_address: 'Calle Acueducto 880, C.P. 45050, Zapopan, Jalisco.',
-    company_rfc: 'PTO000718LM2',
-    company_activity: 'Inyección y extrusión de plásticos.',
-    total_workers: '60',
-    work_schedule: '1 turno de 9 horas',
-    elaborated_by: DATOS_CONSULTORIA,
-    specialist_name: 'Ing. Laura Beltrán Soto',
-    stps_register: 'STPS-AS-0245/20',
-    company_logo: mockLogo('PT', '#1d4ed8'),
-    estudios: []
+/* ============================================================
+ * Acceso a Supabase
+ * ============================================================ */
+
+const obtenerUsuarioId = async () => {
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data?.user) {
+    throw new Error('Tu sesión no es válida. Vuelve a iniciar sesión.', { cause: error });
   }
-];
+  return data.user.id;
+};
+
+// Traduce errores de Supabase / Postgres a mensajes entendibles
+const mensajeError = (error) => {
+  if (!error) return 'Ocurrió un error inesperado.';
+  if (error.code === '23505') {
+    const detalle = `${error.message ?? ''} ${error.details ?? ''}`.toLowerCase();
+    return detalle.includes('rfc')
+      ? 'Ya existe un cliente registrado con ese RFC.'
+      : 'Ya existe un registro con esos datos.';
+  }
+  if (error.code === '23503') return 'El cliente relacionado ya no existe.';
+  if (error.code === '23514') return 'Alguno de los valores no cumple las reglas de la base de datos.';
+  if (error.code === '42501') return 'No tienes permisos para realizar esta acción (revisa las políticas RLS).';
+  if (/failed to fetch|networkerror/i.test(error.message ?? '')) {
+    return 'No hay conexión con Supabase. Revisa tu internet e inténtalo de nuevo.';
+  }
+  return error.message || 'Ocurrió un error inesperado.';
+};
+
+// Sube el logotipo original (sin recomprimir, para conservar la transparencia) y devuelve su URL pública
+const subirLogo = async (file, userId) => {
+  const extension = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+  const ruta = `${userId}/logos/${Date.now()}_${crypto.randomUUID().slice(0, 8)}.${extension}`;
+
+  const { error } = await supabase.storage
+    .from(BUCKET_LOGOS)
+    .upload(ruta, file, { contentType: file.type || undefined, upsert: false });
+  if (error) throw error;
+
+  return supabase.storage.from(BUCKET_LOGOS).getPublicUrl(ruta).data.publicUrl;
+};
 
 /* ============================================================
  * Utilidades de presentación
  * ============================================================ */
 
 const formatearFecha = (iso) =>
-  new Date(`${iso}T00:00:00`).toLocaleDateString('es-MX', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  });
+  iso
+    ? new Date(iso).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })
+    : '';
 
-const iniciales = (nombre) =>
+const iniciales = (nombre = '') =>
   nombre
     .split(' ')
     .filter((p) => p.length > 2)
@@ -115,14 +83,21 @@ const iniciales = (nombre) =>
     .join('')
     .toUpperCase() || '?';
 
+// Claves = valores reales de evaluaciones_norma04.estado
 const ESTADO_ESTUDIO = {
-  borrador: {
+  'En Borrador': {
     label: 'En borrador',
     badge: 'bg-amber-50 text-amber-700 ring-amber-200',
     dot: 'bg-amber-500',
     accion: 'Continuar'
   },
-  completado: {
+  Analizando: {
+    label: 'Analizando',
+    badge: 'bg-sky-50 text-sky-700 ring-sky-200',
+    dot: 'bg-sky-500 animate-pulse',
+    accion: 'Continuar'
+  },
+  Completado: {
     label: 'Completado',
     badge: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
     dot: 'bg-emerald-500',
@@ -135,10 +110,10 @@ const ESTADO_ESTUDIO = {
  * ============================================================ */
 
 function LogoCliente({ cliente }) {
-  return cliente.company_logo ? (
+  return cliente.logo_url ? (
     <img
-      src={cliente.company_logo}
-      alt={`Logotipo de ${cliente.company_name}`}
+      src={cliente.logo_url}
+      alt={`Logotipo de ${cliente.razon_social}`}
       className="w-12 h-12 rounded-lg object-contain border border-slate-200 bg-white shrink-0"
     />
   ) : (
@@ -146,25 +121,27 @@ function LogoCliente({ cliente }) {
       className="w-12 h-12 rounded-lg bg-[#002060]/10 text-[#002060] font-title font-black text-sm flex items-center justify-center shrink-0"
       aria-hidden="true"
     >
-      {iniciales(cliente.company_name)}
+      {iniciales(cliente.razon_social)}
     </div>
   );
 }
 
-function TarjetaCliente({ cliente, onEditar, onEntrarEstudio, onAnadirEstudio }) {
+function TarjetaCliente({ cliente, anadiendo, onEditar, onEntrarEstudio, onAnadirEstudio }) {
+  const estudios = cliente.evaluaciones_norma04 ?? [];
+
   return (
     <article className="bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col">
       {/* Cabecera: logotipo + razón social + editar */}
       <header className="flex items-start gap-3 p-5 border-b border-slate-100">
         <LogoCliente cliente={cliente} />
         <h3 className="flex-1 min-w-0 font-bold text-[#002060] text-sm leading-snug line-clamp-3 pt-0.5">
-          {cliente.company_name}
+          {cliente.razon_social}
         </h3>
         <button
           type="button"
           onClick={() => onEditar(cliente)}
           title="Editar datos del cliente"
-          aria-label={`Editar datos de ${cliente.company_name}`}
+          aria-label={`Editar datos de ${cliente.razon_social}`}
           className="p-2 -mr-1 -mt-1 rounded-lg text-slate-400 hover:text-[#002060] hover:bg-slate-100 transition shrink-0"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -179,24 +156,30 @@ function TarjetaCliente({ cliente, onEditar, onEntrarEstudio, onAnadirEstudio })
           Estudios
         </h4>
 
-        {cliente.estudios.length === 0 ? (
+        {estudios.length === 0 ? (
           <p className="text-sm text-slate-400 italic py-2">Aún no hay estudios registrados.</p>
         ) : (
           <ul className="divide-y divide-slate-100">
-            {cliente.estudios.map((estudio) => {
-              const estado = ESTADO_ESTUDIO[estudio.estado];
+            {estudios.map((estudio) => {
+              const estado = ESTADO_ESTUDIO[estudio.estado] ?? ESTADO_ESTUDIO['En Borrador'];
               return (
                 <li key={estudio.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
                   <div className="flex flex-col items-start gap-1 min-w-0">
-                    <span className="text-sm font-semibold text-slate-700">
-                      {formatearFecha(estudio.fecha)}
-                    </span>
                     <span
-                      className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 ring-inset ${estado.badge}`}
+                      className="text-sm font-semibold text-slate-700 truncate max-w-full"
+                      title={estudio.titulo_proyecto}
                     >
-                      <span className={`w-1.5 h-1.5 rounded-full ${estado.dot}`} />
-                      {estado.label}
+                      {estudio.titulo_proyecto || 'Estudio sin título'}
                     </span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span
+                        className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-0.5 rounded-full ring-1 ring-inset ${estado.badge}`}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${estado.dot}`} />
+                        {estado.label}
+                      </span>
+                      <span className="text-[11px] text-slate-400">{formatearFecha(estudio.fecha_creacion)}</span>
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -217,21 +200,75 @@ function TarjetaCliente({ cliente, onEditar, onEntrarEstudio, onAnadirEstudio })
         <button
           type="button"
           onClick={() => onAnadirEstudio(cliente)}
-          className="group w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border-2 border-dashed border-[#002060]/25 bg-[#002060]/[0.04] text-[#002060]/70 text-sm font-semibold backdrop-blur-sm transition-all duration-200 hover:border-[#002060]/60 hover:bg-[#002060]/10 hover:text-[#002060] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#002060]/40 active:scale-[0.99]"
+          disabled={anadiendo}
+          className="group w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border-2 border-dashed border-[#002060]/25 bg-[#002060]/[0.04] text-[#002060]/70 text-sm font-semibold backdrop-blur-sm transition-all duration-200 hover:border-[#002060]/60 hover:bg-[#002060]/10 hover:text-[#002060] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#002060]/40 active:scale-[0.99] disabled:opacity-60 disabled:cursor-wait"
         >
-          <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#002060]/10 group-hover:bg-[#002060] group-hover:text-white transition-colors">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
-            </svg>
-          </span>
-          Añadir estudio
+          {anadiendo ? (
+            <span className="w-5 h-5 border-2 border-[#002060]/30 border-t-[#002060] rounded-full animate-spin" />
+          ) : (
+            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#002060]/10 group-hover:bg-[#002060] group-hover:text-white transition-colors">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="3" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+              </svg>
+            </span>
+          )}
+          {anadiendo ? 'Creando estudio...' : 'Añadir estudio'}
         </button>
       </footer>
     </article>
   );
 }
 
-function DashboardClientes({ clientes, onNuevo, onEditar, onEntrarEstudio, onAnadirEstudio }) {
+function SkeletonTarjeta() {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 animate-pulse">
+      <div className="flex items-center gap-3 pb-5 border-b border-slate-100">
+        <div className="w-12 h-12 rounded-lg bg-slate-200" />
+        <div className="flex-1 space-y-2">
+          <div className="h-3 bg-slate-200 rounded w-3/4" />
+          <div className="h-3 bg-slate-200 rounded w-1/2" />
+        </div>
+      </div>
+      <div className="pt-5 space-y-3">
+        <div className="h-3 bg-slate-200 rounded w-1/4" />
+        <div className="h-8 bg-slate-100 rounded" />
+        <div className="h-8 bg-slate-100 rounded" />
+      </div>
+    </div>
+  );
+}
+
+function BannerError({ mensaje, onCerrar, onReintentar }) {
+  return (
+    <div role="alert" className="mb-6 flex items-start gap-3 p-4 bg-red-50 border-l-4 border-red-500 rounded-r-md text-red-700 text-sm font-medium">
+      <span className="flex-1">{mensaje}</span>
+      {onReintentar && (
+        <button type="button" onClick={onReintentar} className="font-bold underline hover:text-red-900">
+          Reintentar
+        </button>
+      )}
+      {onCerrar && (
+        <button type="button" onClick={onCerrar} aria-label="Cerrar aviso" className="font-bold hover:text-red-900">
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+function DashboardClientes({
+  clientes,
+  loading,
+  errorCarga,
+  errorAccion,
+  anadiendoA,
+  onNuevo,
+  onEditar,
+  onEntrarEstudio,
+  onAnadirEstudio,
+  onReintentar,
+  onCerrarErrorAccion
+}) {
   return (
     <div className="max-w-6xl mx-auto px-4 py-12">
       {/* Encabezado + acción principal */}
@@ -254,10 +291,22 @@ function DashboardClientes({ clientes, onNuevo, onEditar, onEntrarEstudio, onAna
         </button>
       </div>
 
-      {/* Grid de clientes */}
-      {clientes.length === 0 ? (
+      {errorAccion && <BannerError mensaje={errorAccion} onCerrar={onCerrarErrorAccion} />}
+
+      {loading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6" aria-busy="true" aria-label="Cargando clientes">
+          <SkeletonTarjeta />
+          <SkeletonTarjeta />
+          <SkeletonTarjeta />
+        </div>
+      ) : errorCarga ? (
+        <BannerError mensaje={`No se pudieron cargar tus clientes: ${errorCarga}`} onReintentar={onReintentar} />
+      ) : clientes.length === 0 ? (
         <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-12 text-center text-slate-500">
-          Aún no hay clientes. Presione <strong>+ Nuevo Cliente</strong> para comenzar.
+          <p className="font-semibold text-slate-600 mb-1">Aún no tienes clientes registrados</p>
+          <p className="text-sm">
+            Presiona <strong>+ Nuevo Cliente</strong> para comenzar.
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -265,6 +314,7 @@ function DashboardClientes({ clientes, onNuevo, onEditar, onEntrarEstudio, onAna
             <TarjetaCliente
               key={cliente.id}
               cliente={cliente}
+              anadiendo={anadiendoA === cliente.id}
               onEditar={onEditar}
               onEntrarEstudio={onEntrarEstudio}
               onAnadirEstudio={onAnadirEstudio}
@@ -277,19 +327,23 @@ function DashboardClientes({ clientes, onNuevo, onEditar, onEntrarEstudio, onAna
 }
 
 /* ============================================================
- * Vista secundaria: Formulario de cliente (diseño existente)
+ * Vista secundaria: Formulario de cliente
  * ============================================================ */
 
-function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
+function FormularioCliente({ clienteInicial, guardando, errorServidor, onCancelar, onGuardar }) {
   const esEdicion = Boolean(clienteInicial);
 
   const [formData, setFormData] = useState(() => ({
     ...FORM_VACIO,
     ...(clienteInicial || {}),
-    elaborated_by: DATOS_CONSULTORIA
+    num_trabajadores: clienteInicial?.num_trabajadores?.toString() ?? '',
+    elaborado_por: DATOS_CONSULTORIA
   }));
+  // Logotipo recién seleccionado (aún no subido): archivo + vista previa
+  const [logoLocal, setLogoLocal] = useState(null);
   const [errors, setErrors] = useState({});
-  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const logoVisible = logoLocal?.preview ?? formData.logo_url;
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -300,37 +354,39 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
     }
   };
 
-  // Carga del logo (Base64 en memoria; sin persistencia por ahora)
   const handleLogoChange = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      if (file.size > 2 * 1024 * 1024) {
-        alert('El archivo es demasiado grande. Por favor selecciona un logotipo menor a 2MB.');
-        return;
-      }
+    e.target.value = '';
+    if (!file) return;
 
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setFormData((prev) => ({ ...prev, company_logo: event.target.result }));
-      };
-      reader.readAsDataURL(file);
+    if (file.size > MAX_LOGO_BYTES) {
+      alert('El archivo es demasiado grande. Por favor selecciona un logotipo menor a 2MB.');
+      return;
     }
+
+    const reader = new FileReader();
+    reader.onload = (event) => setLogoLocal({ file, preview: event.target.result });
+    reader.readAsDataURL(file);
   };
 
   const handleRemoveLogo = () => {
-    setFormData((prev) => ({ ...prev, company_logo: null }));
+    setLogoLocal(null);
+    setFormData((prev) => ({ ...prev, logo_url: null }));
   };
 
   const validateForm = () => {
     const newErrors = {};
-    if (!formData.company_name.trim()) newErrors.company_name = 'La razón social es obligatoria';
-    if (!formData.company_address.trim()) newErrors.company_address = 'El domicilio completo es obligatorio';
-    if (!formData.company_rfc.trim()) newErrors.company_rfc = 'El RFC es obligatorio';
-    if (!formData.company_activity.trim()) newErrors.company_activity = 'La actividad económica es obligatoria';
-    if (!formData.total_workers.toString().trim()) newErrors.total_workers = 'Especifique el número de trabajadores';
-    if (!formData.work_schedule.trim()) newErrors.work_schedule = 'Indique la cantidad y horarios de trabajo';
-    if (!formData.specialist_name.trim()) newErrors.specialist_name = 'El nombre del especialista es obligatorio';
-    if (!formData.stps_register.trim()) newErrors.stps_register = 'El registro STPS es obligatorio';
+    const trabajadores = formData.num_trabajadores.toString().trim();
+
+    if (!formData.razon_social.trim()) newErrors.razon_social = 'La razón social es obligatoria';
+    if (!formData.domicilio.trim()) newErrors.domicilio = 'El domicilio completo es obligatorio';
+    if (!formData.rfc.trim()) newErrors.rfc = 'El RFC es obligatorio';
+    if (!formData.rama_industrial.trim()) newErrors.rama_industrial = 'La actividad económica es obligatoria';
+    if (!trabajadores) newErrors.num_trabajadores = 'Especifique el número de trabajadores';
+    else if (!/^\d+$/.test(trabajadores)) newErrors.num_trabajadores = 'Debe ser un número entero';
+    if (!formData.turnos_horarios.trim()) newErrors.turnos_horarios = 'Indique la cantidad y horarios de trabajo';
+    if (!formData.especialista_ing.trim()) newErrors.especialista_ing = 'El nombre del especialista es obligatorio';
+    if (!formData.registro_stps.trim()) newErrors.registro_stps = 'El registro STPS es obligatorio';
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -338,14 +394,14 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    if (guardando) return;
 
     if (!validateForm()) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
 
-    setSaveSuccess(true);
-    setTimeout(() => onGuardar(formData), 600);
+    onGuardar(formData, logoLocal?.file ?? null);
   };
 
   const inputClass = (campo, extra = '') =>
@@ -359,7 +415,8 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
       <button
         type="button"
         onClick={onCancelar}
-        className="mb-6 inline-flex items-center gap-2 text-sm font-semibold text-slate-600 hover:text-[#002060] transition"
+        disabled={guardando}
+        className="mb-6 inline-flex items-center gap-2 text-sm font-semibold text-slate-600 hover:text-[#002060] transition disabled:opacity-50"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -377,17 +434,17 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
         </p>
       </div>
 
-      {/* Alerta de errores */}
+      {/* Alerta de errores de validación */}
       {Object.values(errors).some(Boolean) && (
         <div className="mb-8 p-4 bg-red-50 border-l-4 border-red-500 rounded-r-md text-red-700 text-sm font-medium">
           Por favor complete todos los campos obligatorios marcados en rojo antes de continuar.
         </div>
       )}
 
-      {/* Alerta de éxito */}
-      {saveSuccess && (
-        <div className="mb-8 p-4 bg-green-50 border-l-4 border-green-500 rounded-r-md text-green-700 text-sm font-semibold">
-          ✓ Datos guardados correctamente. Regresando al Dashboard...
+      {/* Error devuelto por Supabase (RFC duplicado, permisos, red, etc.) */}
+      {errorServidor && (
+        <div role="alert" className="mb-8 p-4 bg-red-50 border-l-4 border-red-500 rounded-r-md text-red-700 text-sm font-semibold">
+          {errorServidor}
         </div>
       )}
 
@@ -401,21 +458,22 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
               Logotipo de la Empresa (Opcional)
             </label>
 
-            {formData.company_logo ? (
+            {logoVisible ? (
               <div className="flex items-center gap-6 bg-white p-4 rounded-lg border border-slate-300 w-fit">
                 <img
-                  src={formData.company_logo}
+                  src={logoVisible}
                   alt="Logo de la empresa"
                   className="h-20 max-w-[200px] object-contain rounded border border-slate-100 p-1 bg-white"
                 />
                 <div className="flex flex-col gap-2">
                   <span className="text-xs font-semibold text-green-600 flex items-center gap-1">
-                    ✓ Logotipo cargado
+                    {logoLocal ? '✓ Se subirá al guardar' : '✓ Logotipo cargado'}
                   </span>
                   <button
                     type="button"
                     onClick={handleRemoveLogo}
-                    className="text-xs text-red-600 hover:text-red-800 font-bold underline text-left"
+                    disabled={guardando}
+                    className="text-xs text-red-600 hover:text-red-800 font-bold underline text-left disabled:opacity-50"
                   >
                     Eliminar logotipo
                   </button>
@@ -451,16 +509,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="company_name"
-              value={formData.company_name}
+              name="razon_social"
+              value={formData.razon_social}
               onChange={handleChange}
               placeholder="Razón Social completa de la empresa"
-              className={inputClass('company_name')}
+              className={inputClass('razon_social')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: VITAE LABORATORIOS S.A. DE C.V.
             </p>
-            {errors.company_name && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.company_name}</span>}
+            {errors.razon_social && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.razon_social}</span>}
           </div>
 
           {/* b) Domicilio */}
@@ -469,17 +527,17 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
               b) Domicilio completo <span className="text-red-500">*</span>
             </label>
             <textarea
-              name="company_address"
+              name="domicilio"
               rows={2}
-              value={formData.company_address}
+              value={formData.domicilio}
               onChange={handleChange}
               placeholder="Calle, Número, Colonia, Municipio/Alcaldía, C.P., Estado"
-              className={inputClass('company_address')}
+              className={inputClass('domicilio')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: Av. Industrial No. 105, Col. Parque Industrial, C.P. 44100, Guadalajara, Jalisco.
             </p>
-            {errors.company_address && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.company_address}</span>}
+            {errors.domicilio && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.domicilio}</span>}
           </div>
 
           {/* c) RFC */}
@@ -489,16 +547,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="company_rfc"
-              value={formData.company_rfc}
+              name="rfc"
+              value={formData.rfc}
               onChange={handleChange}
               placeholder="RFC con homoclave"
-              className={inputClass('company_rfc', 'uppercase')}
+              className={inputClass('rfc', 'uppercase')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: VLA920415H88
             </p>
-            {errors.company_rfc && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.company_rfc}</span>}
+            {errors.rfc && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.rfc}</span>}
           </div>
 
           {/* d) Rama industrial */}
@@ -508,16 +566,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="company_activity"
-              value={formData.company_activity}
+              name="rama_industrial"
+              value={formData.rama_industrial}
               onChange={handleChange}
               placeholder="Giro principal de la empresa"
-              className={inputClass('company_activity')}
+              className={inputClass('rama_industrial')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: Fabricación y empaque de productos farmacéuticos.
             </p>
-            {errors.company_activity && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.company_activity}</span>}
+            {errors.rama_industrial && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.rama_industrial}</span>}
           </div>
 
           {/* e) Número de trabajadores */}
@@ -527,16 +585,18 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="number"
-              name="total_workers"
-              value={formData.total_workers}
+              min="0"
+              step="1"
+              name="num_trabajadores"
+              value={formData.num_trabajadores}
               onChange={handleChange}
               placeholder="Total de personal laboral"
-              className={inputClass('total_workers')}
+              className={inputClass('num_trabajadores')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: 45
             </p>
-            {errors.total_workers && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.total_workers}</span>}
+            {errors.num_trabajadores && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.num_trabajadores}</span>}
           </div>
 
           {/* f) Cantidad y horarios */}
@@ -546,16 +606,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="work_schedule"
-              value={formData.work_schedule}
+              name="turnos_horarios"
+              value={formData.turnos_horarios}
               onChange={handleChange}
               placeholder="Especifique turnos y horas"
-              className={inputClass('work_schedule')}
+              className={inputClass('turnos_horarios')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: 2 turnos de 8 horas (Lunes a Sábado de 06:00 a 22:00 hrs)
             </p>
-            {errors.work_schedule && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.work_schedule}</span>}
+            {errors.turnos_horarios && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.turnos_horarios}</span>}
           </div>
 
           {/* g) Estudios elaborado por (READ ONLY / NO EDITABLE) */}
@@ -568,7 +628,7 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <textarea
               readOnly
-              value={formData.elaborated_by}
+              value={formData.elaborado_por}
               rows={2}
               className="w-full p-3 bg-slate-100 text-slate-700 border border-slate-300 rounded-lg cursor-not-allowed resize-none outline-none font-medium select-none"
             />
@@ -584,16 +644,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="specialist_name"
-              value={formData.specialist_name}
+              name="especialista_ing"
+              value={formData.especialista_ing}
               onChange={handleChange}
               placeholder="Nombre del ingeniero responsable"
-              className={inputClass('specialist_name')}
+              className={inputClass('especialista_ing')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: Ing. Carlos Mendoza Reyes
             </p>
-            {errors.specialist_name && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.specialist_name}</span>}
+            {errors.especialista_ing && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.especialista_ing}</span>}
           </div>
 
           {/* i) Registro STPS */}
@@ -603,16 +663,16 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
             </label>
             <input
               type="text"
-              name="stps_register"
-              value={formData.stps_register}
+              name="registro_stps"
+              value={formData.registro_stps}
               onChange={handleChange}
               placeholder="Clave de registro ante la STPS"
-              className={inputClass('stps_register')}
+              className={inputClass('registro_stps')}
             />
             <p className="text-xs text-slate-500 mt-1.5 italic">
               Ejemplo: STPS-AS-0199/18
             </p>
-            {errors.stps_register && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.stps_register}</span>}
+            {errors.registro_stps && <span className="text-xs text-red-500 mt-1 block font-medium">{errors.registro_stps}</span>}
           </div>
 
         </div>
@@ -622,15 +682,20 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
           <button
             type="button"
             onClick={onCancelar}
-            className="bg-white hover:bg-slate-50 text-slate-700 font-bold text-base py-3.5 px-8 rounded-lg border border-slate-300 transition"
+            disabled={guardando}
+            className="bg-white hover:bg-slate-50 text-slate-700 font-bold text-base py-3.5 px-8 rounded-lg border border-slate-300 transition disabled:opacity-50"
           >
             Cancelar
           </button>
           <button
             type="submit"
-            className="bg-[#002060] hover:bg-[#003087] text-white font-bold text-base py-3.5 px-8 rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 flex items-center justify-center gap-2"
+            disabled={guardando}
+            className="bg-[#002060] hover:bg-[#003087] text-white font-bold text-base py-3.5 px-8 rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-wait disabled:transform-none"
           >
-            <span>{esEdicion ? 'Guardar Cambios' : 'Guardar Cliente'}</span>
+            {guardando && (
+              <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+            )}
+            <span>{guardando ? 'Guardando...' : esEdicion ? 'Guardar Cambios' : 'Guardar Cliente'}</span>
           </button>
         </div>
       </form>
@@ -639,63 +704,187 @@ function FormularioCliente({ clienteInicial, onCancelar, onGuardar }) {
 }
 
 /* ============================================================
- * Contenedor: alterna entre Dashboard y Formulario
+ * Contenedor: datos reales de Supabase + alterna Dashboard / Formulario
  * ============================================================ */
 
 export default function Formulario() {
   const navigate = useNavigate();
 
-  // MOCK: estado local; se sustituirá por Supabase más adelante
-  const [clientes, setClientes] = useState(CLIENTES_MOCK);
+  const [clientes, setClientes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [errorCarga, setErrorCarga] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
   const [vista, setVista] = useState('dashboard'); // 'dashboard' | 'formulario'
   const [clienteEnEdicion, setClienteEnEdicion] = useState(null);
+  const [guardando, setGuardando] = useState(false);
+  const [errorGuardado, setErrorGuardado] = useState(null);
+
+  const [anadiendoA, setAnadiendoA] = useState(null); // id del cliente al que se le crea un estudio
+  const [errorAccion, setErrorAccion] = useState(null);
+
+  // Carga clientes del usuario autenticado + sus estudios (relación evaluaciones_norma04.fk_cliente)
+  useEffect(() => {
+    let cancelado = false;
+
+    (async () => {
+      try {
+        const userId = await obtenerUsuarioId();
+
+        const { data, error } = await supabase
+          .from('clientes')
+          .select('*, evaluaciones_norma04(*)')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .order('fecha_creacion', { referencedTable: 'evaluaciones_norma04', ascending: true });
+
+        if (error) throw error;
+        if (cancelado) return;
+
+        setClientes(data ?? []);
+        setErrorCarga(null);
+      } catch (error) {
+        console.error('Error al cargar clientes:', error);
+        if (!cancelado) setErrorCarga(mensajeError(error));
+      } finally {
+        if (!cancelado) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [reloadKey]);
+
+  const recargar = () => {
+    setLoading(true);
+    setReloadKey((k) => k + 1);
+  };
 
   const abrirNuevo = () => {
     setClienteEnEdicion(null);
+    setErrorGuardado(null);
     setVista('formulario');
   };
 
   const abrirEdicion = (cliente) => {
     setClienteEnEdicion(cliente);
+    setErrorGuardado(null);
     setVista('formulario');
   };
 
   const volverAlDashboard = () => {
     setClienteEnEdicion(null);
+    setErrorGuardado(null);
     setVista('dashboard');
   };
 
-  const guardarCliente = (datos) => {
-    if (clienteEnEdicion) {
-      setClientes((prev) =>
-        prev.map((c) => (c.id === clienteEnEdicion.id ? { ...c, ...datos } : c))
-      );
-    } else {
-      setClientes((prev) => [
-        ...prev,
-        { ...datos, id: `cli-${Date.now()}`, estudios: [] }
-      ]);
+  // INSERT (nuevo) o UPDATE (edición) en `clientes`, subiendo antes el logotipo si se eligió uno
+  const guardarCliente = async (datos, logoFile) => {
+    setGuardando(true);
+    setErrorGuardado(null);
+
+    try {
+      const userId = await obtenerUsuarioId();
+
+      let logoUrl = datos.logo_url ?? null;
+      if (logoFile) logoUrl = await subirLogo(logoFile, userId);
+
+      const payload = {
+        logo_url: logoUrl,
+        razon_social: datos.razon_social.trim(),
+        domicilio: datos.domicilio.trim(),
+        rfc: datos.rfc.trim().toUpperCase(),
+        rama_industrial: datos.rama_industrial.trim(),
+        num_trabajadores: parseInt(datos.num_trabajadores, 10),
+        turnos_horarios: datos.turnos_horarios.trim(),
+        elaborado_por: DATOS_CONSULTORIA,
+        especialista_ing: datos.especialista_ing.trim(),
+        registro_stps: datos.registro_stps.trim()
+      };
+
+      if (clienteEnEdicion) {
+        const { error } = await supabase
+          .from('clientes')
+          .update({ ...payload, updated_at: new Date().toISOString() })
+          .eq('id', clienteEnEdicion.id)
+          .eq('user_id', userId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('clientes').insert({ ...payload, user_id: userId });
+        if (error) throw error;
+      }
+
+      volverAlDashboard();
+      recargar();
+    } catch (error) {
+      console.error('Error al guardar el cliente:', error);
+      setErrorGuardado(mensajeError(error));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } finally {
+      setGuardando(false);
     }
-    volverAlDashboard();
   };
 
-  // MOCK: agrega un estudio en borrador con la fecha de hoy
-  const anadirEstudio = (cliente) => {
-    const hoy = new Date();
-    const fecha = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`;
-    const nuevo = { id: `est-${Date.now()}`, fecha, estado: 'borrador' };
+  // INSERT en `evaluaciones_norma04` con el título capturado
+  const anadirEstudio = async (cliente) => {
+    const titulo = window.prompt(`Título del Proyecto / Estudio para "${cliente.razon_social}":`);
+    if (titulo === null) return; // canceló
 
-    setClientes((prev) =>
-      prev.map((c) =>
-        c.id === cliente.id ? { ...c, estudios: [...c.estudios, nuevo] } : c
-      )
+    const tituloLimpio = titulo.trim();
+    if (!tituloLimpio) {
+      setErrorAccion('El título del proyecto no puede estar vacío.');
+      return;
+    }
+
+    setAnadiendoA(cliente.id);
+    setErrorAccion(null);
+
+    try {
+      const { error } = await supabase
+        .from('evaluaciones_norma04')
+        .insert({ fk_cliente: cliente.id, titulo_proyecto: tituloLimpio, estado: 'En Borrador' });
+      if (error) throw error;
+
+      recargar();
+    } catch (error) {
+      console.error('Error al crear el estudio:', error);
+      setErrorAccion(`No se pudo crear el estudio: ${mensajeError(error)}`);
+    } finally {
+      setAnadiendoA(null);
+    }
+  };
+
+  // Guarda el proyecto activo y pasa al Análisis de Riesgo de Maquinaria
+  const entrarAEstudio = (cliente, estudio) => {
+    localStorage.setItem(
+      'proyecto_activo',
+      JSON.stringify({
+        cliente_id: cliente.id,
+        evaluacion_id: estudio.id,
+        titulo_proyecto: estudio.titulo_proyecto,
+        razon_social: cliente.razon_social
+      })
     );
-  };
 
-  // MOCK: mantiene compatibilidad con las pantallas siguientes (leen localStorage)
-  const entrarAEstudio = (cliente) => {
-    localStorage.setItem('company_name', cliente.company_name);
-    localStorage.setItem('company_address', cliente.company_address);
+    // Puente temporal: el exportador Word de "Mis Equipos" aún lee estas llaves antiguas
+    localStorage.setItem(
+      'programa_seguridad_todos_datos',
+      JSON.stringify({
+        company_name: cliente.razon_social,
+        company_address: cliente.domicilio,
+        company_rfc: cliente.rfc,
+        company_activity: cliente.rama_industrial,
+        total_workers: cliente.num_trabajadores,
+        work_schedule: cliente.turnos_horarios,
+        elaborated_by: cliente.elaborado_por,
+        specialist_name: cliente.especialista_ing,
+        stps_register: cliente.registro_stps
+      })
+    );
+    localStorage.setItem('company_name', cliente.razon_social);
+    localStorage.setItem('company_address', cliente.domicilio);
+
     navigate('/analisis-datos');
   };
 
@@ -704,6 +893,8 @@ export default function Formulario() {
       <FormularioCliente
         key={clienteEnEdicion?.id ?? 'nuevo'}
         clienteInicial={clienteEnEdicion}
+        guardando={guardando}
+        errorServidor={errorGuardado}
         onCancelar={volverAlDashboard}
         onGuardar={guardarCliente}
       />
@@ -713,10 +904,16 @@ export default function Formulario() {
   return (
     <DashboardClientes
       clientes={clientes}
+      loading={loading}
+      errorCarga={errorCarga}
+      errorAccion={errorAccion}
+      anadiendoA={anadiendoA}
       onNuevo={abrirNuevo}
       onEditar={abrirEdicion}
       onEntrarEstudio={entrarAEstudio}
       onAnadirEstudio={anadirEstudio}
+      onReintentar={recargar}
+      onCerrarErrorAccion={() => setErrorAccion(null)}
     />
   );
 }
