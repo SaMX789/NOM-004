@@ -1,75 +1,50 @@
-import { useState, useEffect, useRef } from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { preAnalizarEquipo } from '../services/n8nService';
+import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { comprimirImagen } from '../utils/imageCompressor';
-import { subirImagenSupabase } from '../services/storageService';
-import { dbService, EQUIPO_STATUS } from '../services/dbService';
+import {
+  FASES,
+  guardarBorrador,
+  obtenerProyectoActivo,
+  registrarConIA
+} from '../services/equiposService';
 import { useAuth } from '../context/AuthContext';
 
 const MIN_IMAGENES = 1;
 const MAX_IMAGENES = 2;
 
-const EQUIPO_VACIO = {
-  id: null,
-  status: null,
-  equipo: '',
-  descripcion_manual: '',
-  identificacion: '',
-  departamento: ''
-};
-
 const ENLACE_DRIVE_REGEX = /^https:\/\/(drive|docs)\.google\.com\/(drive\/(u\/\d+\/)?folders\/|folders\/|file\/d\/|open\?id=)[\w-]+/i;
 
 const TOAST_OCULTO = { show: false, message: '', type: 'success' };
 
-const liberarPreview = (img) => {
-  if (img?.file && img.preview?.startsWith('blob:')) URL.revokeObjectURL(img.preview);
+const TEXTO_FASE = {
+  [FASES.SUBIENDO]: 'Subiendo imágenes...',
+  [FASES.ANALIZANDO]: 'Analizando con IA...',
+  [FASES.GUARDANDO]: 'Guardando equipo...'
 };
 
-// Convierte un equipo guardado (Supabase) al estado del formulario
-const equipoAFormulario = (eq) => ({
-  id: eq.id,
-  status: eq.status || EQUIPO_STATUS.BORRADOR,
-  equipo: eq.equipo || '',
-  descripcion_manual: eq.descripcion_manual || '',
-  identificacion: eq.identificacion || '',
-  departamento: eq.departamento || ''
-});
-
-const urlsAImagenes = (urls) =>
-  (Array.isArray(urls) ? urls : []).slice(0, MAX_IMAGENES).map((url, index) => ({
-    id: `img_loaded_${index}`,
-    name: `Imagen ${index + 1}`,
-    file: null,
-    preview: url,
-    url
-  }));
+const liberarPreview = (img) => {
+  if (img?.preview?.startsWith('blob:')) URL.revokeObjectURL(img.preview);
+};
 
 export default function Analisisdatos() {
-  const location = useLocation();
   const { userId } = useAuth();
-  const inputNombreRef = useRef(null);
 
-  // Si se llega desde "Mis Equipos" con un equipo a editar, se precarga en el estado inicial
-  const equipoEditar = location.state?.equipoEditar;
+  // Estudio activo: de aquí sale el fk_evaluacion con el que se guardan los equipos
+  const [proyecto] = useState(() => obtenerProyectoActivo());
 
-  const [equipoData, setEquipoData] = useState(() =>
-    equipoEditar ? equipoAFormulario(equipoEditar) : EQUIPO_VACIO
-  );
-  const [imagenesCargadas, setImagenesCargadas] = useState(() =>
-    urlsAImagenes(equipoEditar?.imagenes_urls)
-  );
+  const [nombre, setNombre] = useState('');
+  const [descripcion, setDescripcion] = useState('');
+  const [identificacion, setIdentificacion] = useState('');
+  const [departamento, setDepartamento] = useState('');
+  const [imagenesCargadas, setImagenesCargadas] = useState([]);
   const [driveLink, setDriveLink] = useState('');
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  const [modoManualAviso, setModoManualAviso] = useState(null);
-  const [toast, setToast] = useState(() =>
-    equipoEditar
-      ? { show: true, message: `Equipo "${equipoEditar.equipo || 'Sin nombre'}" cargado para edición`, type: 'success' }
-      : TOAST_OCULTO
-  );
 
-  const isBusy = isAnalyzing || isSaving;
+  const [fase, setFase] = useState(null); // null | 'subiendo' | 'analizando' | 'guardando'
+  const [errorRegistro, setErrorRegistro] = useState(null);
+  const [ultimoRegistro, setUltimoRegistro] = useState(null); // { nombre, modo } tras un registro exitoso
+  const [toast, setToast] = useState(TOAST_OCULTO);
+
+  const isBusy = fase !== null;
 
   const showToast = (message, type = 'success') => {
     setToast({ show: true, message, type });
@@ -82,9 +57,14 @@ export default function Analisisdatos() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setEquipoData(prev => ({ ...prev, [name]: value }));
+  const handleNombreChange = (e) => {
+    setNombre(e.target.value);
+    setUltimoRegistro(null);
+  };
+
+  const handleDescripcionChange = (e) => {
+    setDescripcion(e.target.value);
+    setUltimoRegistro(null);
   };
 
   const handleImagenesChange = async (e) => {
@@ -126,8 +106,7 @@ export default function Analisisdatos() {
           id: 'img_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
           name: compressedFile.name || file.name,
           file: compressedFile,
-          preview: URL.createObjectURL(compressedFile),
-          url: ''
+          preview: URL.createObjectURL(compressedFile)
         });
       } catch (error) {
         console.error('Error al comprimir la imagen:', error);
@@ -137,6 +116,7 @@ export default function Analisisdatos() {
 
     setImagenesCargadas(prev => [...prev, ...nuevasImagenes]);
     if (nuevasImagenes.length > 0) {
+      setUltimoRegistro(null);
       showToast(`${nuevasImagenes.length} imagen(es) comprimida(s) (≤ 500 KB)`, 'success');
     }
   };
@@ -150,142 +130,81 @@ export default function Analisisdatos() {
 
   const handleLimpiarFormulario = () => {
     imagenesCargadas.forEach(liberarPreview);
-    setEquipoData(EQUIPO_VACIO);
+    setNombre('');
+    setDescripcion('');
+    setIdentificacion('');
+    setDepartamento('');
     setImagenesCargadas([]);
-    setModoManualAviso(null);
+    setErrorRegistro(null);
+    setUltimoRegistro(null);
     showToast('Formulario listo para un nuevo equipo', 'success');
   };
 
-  // Sube a Supabase Storage ('equipos-fotos') solo las imágenes que aún no tienen URL
-  const subirImagenesPendientes = async () => {
-    const actualizadas = await Promise.all(
-      imagenesCargadas.map(async (img) => {
-        if (img.url) return img;
-        const url = await subirImagenSupabase(img.file, userId, 'imagenes');
-        return { ...img, url };
-      })
-    );
-    setImagenesCargadas(actualizadas);
-    return actualizadas.map(img => img.url);
-  };
+  // Validaciones de cada flujo
+  const hayFotos = imagenesCargadas.length >= MIN_IMAGENES;
+  const tieneNombre = nombre.trim().length > 0;
+  const tieneDescripcion = descripcion.trim().length > 0;
 
-  const persistirBorrador = async (datos) => {
-    const guardado = await dbService.guardarBorrador(userId, { id: equipoData.id, ...datos });
-    setEquipoData(prev => ({ ...prev, id: guardado.id, status: guardado.status }));
-    return guardado;
-  };
+  const puedeAnalizarConIA = Boolean(proyecto) && hayFotos && !isBusy;
+  const puedeGuardarBorrador = puedeAnalizarConIA && tieneNombre && tieneDescripcion;
 
-  const validarImagenes = () => {
-    if (imagenesCargadas.length < MIN_IMAGENES) {
-      showToast(`Agrega al menos ${MIN_IMAGENES} fotografía del equipo (máximo ${MAX_IMAGENES}).`, 'error');
-      return false;
-    }
-    if (imagenesCargadas.length > MAX_IMAGENES) {
-      showToast(`Solo se permiten máximo ${MAX_IMAGENES} fotografías por equipo.`, 'error');
-      return false;
-    }
-    return true;
-  };
+  const faltantesBorrador = [
+    !hayFotos && 'fotos',
+    !tieneNombre && 'nombre',
+    !tieneDescripcion && 'descripción'
+  ].filter(Boolean);
 
-  // --- FASE 1: PRE-ANÁLISIS VISUAL CON IA + DEGRADACIÓN ELEGANTE SIN MOCKS ---
-  const handlePreAnalisis = async () => {
-    if (!validarImagenes()) return;
-
-    setIsAnalyzing(true);
-    setModoManualAviso(null);
+  // Ejecuta un flujo de registro (con IA o manual) con manejo común de fases, errores y reinicio
+  const ejecutarRegistro = async (flujo, modo) => {
+    setErrorRegistro(null);
+    setFase(FASES.SUBIENDO);
 
     try {
-      // 1. Subir primero las fotografías a Supabase Storage (esto no depende de n8n)
-      const imagenesUrls = await subirImagenesPendientes();
-
-      // 2. Intentar pre-análisis en el Webhook 1 de n8n
-      try {
-        const resultado = await preAnalizarEquipo({
-          user_id: userId,
-          equipo_id: equipoData.id,
-          identificacion: equipoData.identificacion,
-          departamento: equipoData.departamento,
-          imagenes_urls: imagenesUrls
-        });
-
-        const nombre = resultado.nombre_equipo || equipoData.equipo;
-        const descripcion = resultado.descripcion || equipoData.descripcion_manual;
-
-        setEquipoData(prev => ({ ...prev, equipo: nombre, descripcion_manual: descripcion }));
-
-        await persistirBorrador({
-          equipo: nombre,
-          descripcion_manual: descripcion,
-          identificacion: equipoData.identificacion,
-          departamento: equipoData.departamento,
-          imagenes_urls: imagenesUrls
-        });
-
-        showToast('Pre-análisis completado. Equipo guardado como borrador en Mis Equipos', 'success');
-      } catch (iaError) {
-        // Degradación elegante (Graceful Degradation):
-        // Si n8n falla (Failed to fetch / ERR_SSL_PROTOCOL_ERROR / 500), NO usamos Mocks falsos
-        // ni perdemos las fotos subidas: guardamos el borrador con los campos actuales (vacíos o escritos)
-        // y habilitamos la captura manual para que el usuario continúe sin bloqueos.
-        console.warn('Pre-análisis IA no disponible, activando modo manual:', iaError);
-
-        await persistirBorrador({
-          equipo: equipoData.equipo.trim(),
-          descripcion_manual: equipoData.descripcion_manual,
-          identificacion: equipoData.identificacion,
-          departamento: equipoData.departamento,
-          imagenes_urls: imagenesUrls
-        });
-
-        setModoManualAviso(
-          'Fotos guardadas. La IA no respondió: escribe el nombre y la descripción manualmente.'
-        );
-
-        showToast(
-          'Fotos guardadas en borrador. IA no disponible temporalmente: completa los datos manualmente.',
-          'warning'
-        );
-
-        setTimeout(() => inputNombreRef.current?.focus(), 100);
-      }
-    } catch (storageOrDbError) {
-      showToast(storageOrDbError?.message || 'Ocurrió un error al guardar las imágenes.', 'error');
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  // Guarda el borrador manualmente sin llamar a la IA
-  const handleGuardarCambios = async () => {
-    if (!validarImagenes()) return;
-
-    setIsSaving(true);
-    try {
-      const imagenesUrls = await subirImagenesPendientes();
-      await persistirBorrador({
-        equipo: equipoData.equipo.trim(),
-        descripcion_manual: equipoData.descripcion_manual,
-        identificacion: equipoData.identificacion,
-        departamento: equipoData.departamento,
-        imagenes_urls: imagenesUrls
+      const resultado = await flujo({
+        archivos: imagenesCargadas.map(img => img.file),
+        userId,
+        fkEvaluacion: proyecto.evaluacion_id,
+        nombre,
+        descripcion,
+        identificacion,
+        departamento,
+        onFase: setFase
       });
-      setModoManualAviso(null);
-      showToast('Borrador guardado correctamente en Mis Equipos', 'success');
+
+      // Éxito: reinicia el formulario (Mis Equipos lee de Supabase cada vez que se abre)
+      imagenesCargadas.forEach(liberarPreview);
+      setImagenesCargadas([]);
+      setNombre('');
+      setDescripcion('');
+      setIdentificacion('');
+      setDepartamento('');
+      setUltimoRegistro({ nombre: resultado.nombre, modo });
+      showToast(
+        modo === 'ia'
+          ? 'Equipo analizado con IA y registrado.'
+          : 'Borrador guardado correctamente.',
+        'success'
+      );
     } catch (error) {
-      showToast(error?.message || 'Ocurrió un error inesperado.', 'error');
+      // Error: el servicio ya borró del bucket los archivos de esta operación.
+      // Se conserva lo escrito y las fotos seleccionadas para reintentar.
+      console.error('Error en el registro del equipo:', error);
+      setErrorRegistro(error.message || 'Ocurrió un error inesperado.');
+      showToast(error.message || 'Ocurrió un error inesperado.', 'error');
     } finally {
-      setIsSaving(false);
+      setFase(null);
     }
   };
 
-  const toastBgClass =
-    toast.type === 'error'
-      ? 'bg-red-600'
-      : toast.type === 'warning'
-        ? 'bg-amber-600'
-        : toast.type === 'info'
-          ? 'bg-[#002060]'
-          : 'bg-emerald-600';
+  const handleAnalizarConIA = () => {
+    if (!puedeAnalizarConIA) return;
+    ejecutarRegistro(registrarConIA, 'ia');
+  };
+
+  const handleGuardarBorrador = () => {
+    if (!puedeGuardarBorrador) return;
+    ejecutarRegistro(guardarBorrador, 'manual');
+  };
 
   // Importación masiva desde Drive: por ahora solo valida el enlace (la lógica de importación aún no está conectada)
   const handleImportarDrive = (e) => {
@@ -297,16 +216,25 @@ export default function Analisisdatos() {
     showToast('Enlace válido. La importación desde Drive estará disponible pronto.', 'info');
   };
 
+  const toastBgClass =
+    toast.type === 'error'
+      ? 'bg-red-600'
+      : toast.type === 'warning'
+        ? 'bg-amber-600'
+        : toast.type === 'info'
+          ? 'bg-[#002060]'
+          : 'bg-emerald-600';
+
   // Estilos "glass" reutilizables
   const glassCard =
     'rounded-3xl border border-white/60 bg-white/55 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,32,96,0.08)]';
   const glassInput =
-    'w-full rounded-xl border border-slate-200/80 bg-white/60 py-3 text-sm text-slate-800 placeholder:text-slate-400 backdrop-blur transition outline-none focus:bg-white/90 focus:border-[#002060]/40 focus:ring-2 focus:ring-[#002060]/20';
+    'w-full rounded-xl border border-slate-200/80 bg-white/60 py-3 text-sm text-slate-800 placeholder:text-slate-400 backdrop-blur transition outline-none focus:bg-white/90 focus:border-[#002060]/40 focus:ring-2 focus:ring-[#002060]/20 disabled:opacity-60';
 
   const pasos = [
-    { label: 'Fotos', hecho: imagenesCargadas.length >= MIN_IMAGENES },
-    { label: 'Identificar', hecho: equipoData.equipo.trim().length > 0 },
-    { label: 'Guardado', hecho: Boolean(equipoData.id) }
+    { label: 'Fotos', hecho: hayFotos },
+    { label: 'Datos', hecho: tieneNombre && tieneDescripcion },
+    { label: 'Guardado', hecho: Boolean(ultimoRegistro) }
   ];
 
   const ranurasVacias = Math.max(0, MAX_IMAGENES - imagenesCargadas.length);
@@ -337,9 +265,7 @@ export default function Analisisdatos() {
           <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-md z-50 flex items-center justify-center">
             <div className="bg-white/80 backdrop-blur-xl p-8 rounded-3xl shadow-2xl text-center max-w-xs border border-white/60">
               <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="font-title text-xl font-bold text-[#002060]">
-                {isAnalyzing ? 'Analizando con IA...' : 'Guardando...'}
-              </p>
+              <p className="font-title text-xl font-bold text-[#002060]">{TEXTO_FASE[fase]}</p>
             </div>
           </div>
         )}
@@ -351,7 +277,16 @@ export default function Analisisdatos() {
             <div>
               <p className="text-blue-200 text-[11px] font-bold uppercase tracking-widest mb-1">Fase 1 · Pre-análisis</p>
               <h1 className="font-title text-3xl md:text-4xl font-black uppercase tracking-wide">Registro de Equipo</h1>
-              <p className="text-blue-100/80 text-sm mt-1">Sube las fotos y la IA identifica el equipo.</p>
+              <p className="text-blue-100/80 text-sm mt-1">
+                {proyecto ? (
+                  <>
+                    Estudio: <span className="font-semibold text-white">{proyecto.titulo_proyecto}</span>
+                    {proyecto.razon_social ? ` · ${proyecto.razon_social}` : ''}
+                  </>
+                ) : (
+                  'Sube las fotos y la IA identifica el equipo.'
+                )}
+              </p>
             </div>
 
             <ol className="flex items-center gap-2 self-start md:self-auto">
@@ -376,10 +311,45 @@ export default function Analisisdatos() {
           </div>
         </header>
 
-        {equipoData.status === EQUIPO_STATUS.COMPLETADO && (
-          <div className="mb-6 flex items-center gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm font-medium">
-            <Icon className="w-5 h-5 text-amber-600 shrink-0" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-            Equipo ya analizado. Si guardas cambios, vuelve a borrador.
+        {/* Sin estudio activo: no hay fk_evaluacion con el cual guardar */}
+        {!proyecto && (
+          <section className={`${glassCard} p-8 text-center mb-6`}>
+            <p className="font-title text-xl font-black text-[#002060] uppercase mb-1">No hay un estudio activo</p>
+            <p className="text-sm text-slate-600 mb-5">Entra a un estudio desde Datos Empresariales para registrar equipos.</p>
+            <Link
+              to="/formulario"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#002060] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:bg-[#001040]"
+            >
+              Ir a Datos Empresariales
+            </Link>
+          </section>
+        )}
+
+        {/* Resultado del último registro */}
+        {ultimoRegistro && (
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 px-5 py-4 rounded-2xl bg-emerald-100/60 backdrop-blur border border-emerald-300/50 text-emerald-900">
+            <div className="flex items-center gap-3 min-w-0">
+              <Icon className="w-5 h-5 text-emerald-600 shrink-0" strokeWidth={2.5} d="M4.5 12.75l6 6 9-13.5" />
+              <p className="text-sm font-medium truncate">
+                {ultimoRegistro.modo === 'ia' ? 'Registrado con IA' : 'Borrador guardado'}:{' '}
+                <span className="font-bold">{ultimoRegistro.nombre}</span>
+              </p>
+            </div>
+            <Link to="/mis-equipos" className="text-sm font-bold text-emerald-800 underline hover:text-emerald-950 whitespace-nowrap">
+              Ver en Mis equipos
+            </Link>
+          </div>
+        )}
+
+        {/* Error del último intento */}
+        {errorRegistro && (
+          <div role="alert" className="mb-6 flex items-start gap-3 px-5 py-4 rounded-2xl bg-red-100/60 backdrop-blur border border-red-300/50 text-red-900 text-sm">
+            <Icon className="w-5 h-5 text-red-600 shrink-0 mt-0.5" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+            <p className="flex-1">
+              <span className="font-bold">{errorRegistro}</span>{' '}
+              <span className="opacity-80">No se guardó nada; tus fotos y textos se conservaron para reintentar.</span>
+            </p>
+            <button type="button" onClick={() => setErrorRegistro(null)} aria-label="Cerrar aviso" className="font-bold hover:text-red-950">✕</button>
           </div>
         )}
 
@@ -452,33 +422,17 @@ export default function Analisisdatos() {
                   <Icon className="w-6 h-6 text-[#002060]/70" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
                   Fotos <span className="text-red-500">*</span>
                 </h2>
-                <div className="flex items-center gap-2">
-                  {equipoData.status && (
-                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-bold ${
-                      equipoData.status === EQUIPO_STATUS.COMPLETADO
-                        ? 'bg-emerald-100/80 text-emerald-800'
-                        : 'bg-amber-100/80 text-amber-800'
-                    }`}>
-                      {equipoData.status === EQUIPO_STATUS.COMPLETADO ? 'Completado' : 'Borrador'}
-                    </span>
-                  )}
-                  <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#002060]/10 text-[#002060]">
-                    {imagenesCargadas.length}/{MAX_IMAGENES}
-                  </span>
-                </div>
+                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#002060]/10 text-[#002060]">
+                  {imagenesCargadas.length}/{MAX_IMAGENES}
+                </span>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 {imagenesCargadas.map((img, i) => (
                   <div key={img.id} className="relative group aspect-[4/3] rounded-2xl overflow-hidden border border-white/70 bg-slate-100/60 shadow-sm">
                     <img src={img.preview} alt={img.name} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
-                    <div className="absolute inset-x-0 bottom-0 p-2.5 bg-linear-to-t from-slate-900/60 to-transparent flex items-center justify-between">
+                    <div className="absolute inset-x-0 bottom-0 p-2.5 bg-linear-to-t from-slate-900/60 to-transparent">
                       <span className="text-[11px] font-semibold text-white">{etiquetasRanura[i]}</span>
-                      {img.url && (
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-200">
-                          <Icon className="w-3 h-3" strokeWidth={3} d="M4.5 12.75l6 6 9-13.5" /> Subida
-                        </span>
-                      )}
                     </div>
                     <button
                       type="button"
@@ -526,14 +480,16 @@ export default function Analisisdatos() {
               <div className="mt-5">
                 <button
                   type="button"
-                  onClick={handlePreAnalisis}
-                  disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                  onClick={handleAnalizarConIA}
+                  disabled={!puedeAnalizarConIA}
                   className="w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-linear-to-r from-[#002060] to-[#1d4ed8] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:shadow-xl hover:-translate-y-0.5 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed"
                 >
                   <Icon className="w-5 h-5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
                   Analizar con IA
                 </button>
-                <p className="mt-2 text-[11px] text-slate-500 text-center">Guarda un borrador automáticamente</p>
+                <p className="mt-2 text-[11px] text-slate-500 text-center">
+                  Si escribes nombre o descripción abajo, la IA los toma en cuenta
+                </p>
               </div>
             </section>
 
@@ -547,29 +503,29 @@ export default function Analisisdatos() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="relative">
-                  <label htmlFor="identificacion" className="sr-only">No. de Identificación / Tag</label>
+                  <label htmlFor="identificacion" className="sr-only">Identificación</label>
                   <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
                   <input
                     id="identificacion"
                     type="text"
-                    name="identificacion"
-                    value={equipoData.identificacion}
-                    onChange={handleInputChange}
-                    placeholder="Tag / No. de inventario"
+                    value={identificacion}
+                    onChange={(e) => setIdentificacion(e.target.value)}
+                    disabled={isBusy}
+                    placeholder="Identificación (Opcional)"
                     className={`${glassInput} pl-11 pr-4`}
                   />
                 </div>
 
                 <div className="relative">
-                  <label htmlFor="departamento" className="sr-only">Departamento / Área</label>
+                  <label htmlFor="departamento" className="sr-only">Área</label>
                   <Icon className="w-5 h-5 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
                   <input
                     id="departamento"
                     type="text"
-                    name="departamento"
-                    value={equipoData.departamento}
-                    onChange={handleInputChange}
-                    placeholder="Departamento / Área"
+                    value={departamento}
+                    onChange={(e) => setDepartamento(e.target.value)}
+                    disabled={isBusy}
+                    placeholder="Área (Opcional)"
                     className={`${glassInput} pl-11 pr-4`}
                   />
                 </div>
@@ -581,53 +537,59 @@ export default function Analisisdatos() {
               <h2 className="flex items-center gap-2.5 font-title text-lg font-black text-[#002060] uppercase tracking-wide mb-5">
                 <Icon className="w-6 h-6 text-[#002060]/70" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
                 Equipo
+                <span className="text-[11px] font-semibold text-slate-400 normal-case tracking-normal">opcional con IA</span>
               </h2>
-
-              {modoManualAviso && (
-                <div className="mb-5 flex items-start gap-3 px-4 py-3 rounded-2xl bg-amber-100/60 backdrop-blur border border-amber-300/50 text-amber-900 text-sm">
-                  <Icon className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" d="M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                  <p>{modoManualAviso}</p>
-                </div>
-              )}
 
               <div className="space-y-4">
                 <div>
-                  <label htmlFor="equipo" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Nombre</label>
+                  <label htmlFor="equipo" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Nombre del Equipo</label>
                   <input
-                    ref={inputNombreRef}
                     id="equipo"
                     type="text"
                     name="equipo"
-                    value={equipoData.equipo}
-                    onChange={handleInputChange}
+                    value={nombre}
+                    onChange={handleNombreChange}
+                    disabled={isBusy}
                     placeholder="Marca y modelo · Ej. Torno Paralelo"
                     className={`${glassInput} px-4`}
                   />
+                  {!tieneNombre && (
+                    <p className="mt-1 text-[11px] text-amber-700">Requerido solo para guardar sin IA</p>
+                  )}
                 </div>
 
                 <div>
-                  <label htmlFor="descripcion_manual" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Descripción</label>
+                  <label htmlFor="descripcion_manual" className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-1.5">Descripción técnica del equipo</label>
                   <textarea
                     id="descripcion_manual"
                     name="descripcion_manual"
                     rows={4}
-                    value={equipoData.descripcion_manual}
-                    onChange={handleInputChange}
+                    value={descripcion}
+                    onChange={handleDescripcionChange}
+                    disabled={isBusy}
                     placeholder="Funcionamiento, partes móviles, fuentes de energía..."
                     className={`${glassInput} px-4 resize-none`}
                   />
+                  {!tieneDescripcion && (
+                    <p className="mt-1 text-[11px] text-amber-700">Requerido solo para guardar sin IA</p>
+                  )}
                 </div>
 
-                <div className="flex justify-end">
+                <div className="flex flex-col items-end gap-1.5">
                   <button
                     type="button"
-                    onClick={handleGuardarCambios}
-                    disabled={isBusy || imagenesCargadas.length < MIN_IMAGENES}
+                    onClick={handleGuardarBorrador}
+                    disabled={!puedeGuardarBorrador}
                     className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-[#002060]/30 bg-white/50 backdrop-blur text-[#002060] font-bold transition hover:bg-white/90 hover:border-[#002060]/60 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Icon className="w-5 h-5" d="M4.5 12.75l6 6 9-13.5" />
                     Guardar borrador
                   </button>
+                  {faltantesBorrador.length > 0 && (
+                    <p className="text-[11px] text-slate-500">
+                      Sin IA falta: {faltantesBorrador.join(', ')}
+                    </p>
+                  )}
                 </div>
               </div>
             </section>
