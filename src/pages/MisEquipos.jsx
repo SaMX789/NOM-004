@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { dbService, EQUIPO_STATUS } from '../services/dbService';
+import { obtenerProyectoActivo } from '../services/equiposService';
 import { analizarEquipoProfundo, generarDocumentoWord } from '../services/n8nService';
 import { useAuth } from '../context/AuthContext';
-
-const DIAS_SEMANA = ['Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sa'];
 
 const CATALOGO_RIESGOS = [
   { code: 'a1', label: 'a1) Partes en movimiento' },
@@ -48,7 +47,10 @@ const getNivelBadgeClass = (valor) => {
 
 export default function MisEquipos() {
   const { userId } = useAuth();
-  const navigate = useNavigate();
+
+  // Estudio activo (lo define Datos Empresariales al presionar "Continuar / Entrar")
+  const [proyecto] = useState(() => obtenerProyectoActivo());
+  const fkEvaluacion = proyecto?.evaluacion_id ?? null;
 
   const [equipos, setEquipos] = useState([]);
   const [dirtyIds, setDirtyIds] = useState({});       // { [id]: true } cuando hay ediciones locales sin guardar
@@ -65,7 +67,7 @@ export default function MisEquipos() {
   });
   const cancelQueueRef = useRef(false);
 
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(Boolean(fkEvaluacion));
   const [isGenerating, setIsGenerating] = useState(false);
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
 
@@ -79,59 +81,32 @@ export default function MisEquipos() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  // Carga inicial desde Supabase Database
+  // Carga inicial desde Supabase: equipos del estudio activo (con sus imágenes y análisis)
   useEffect(() => {
-    if (!userId) return;
+    if (!fkEvaluacion) return;
     let cancelado = false;
 
-    dbService.obtenerTodos(userId)
+    dbService.obtenerPorEvaluacion(fkEvaluacion)
       .then((lista) => { if (!cancelado) setEquipos(lista); })
       .catch((error) => { if (!cancelado) showToast(error.message, 'error'); })
       .finally(() => { if (!cancelado) setIsLoading(false); });
 
     return () => { cancelado = true; };
-  }, [userId, showToast]);
+  }, [fkEvaluacion, showToast]);
 
   const borradores = equipos.filter(eq => eq.status !== EQUIPO_STATUS.COMPLETADO);
   const completados = equipos.filter(eq => eq.status === EQUIPO_STATUS.COMPLETADO);
 
-  // --- EDICIÓN EN LÍNEA DE BORRADORES (FASE 2) ---
+  // --- EDICIÓN EN LÍNEA DE BORRADORES (FASE 2 · SIN EXPOSICIÓN) ---
   const actualizarCampoLocal = (id, campo, valor) => {
-    if (campo === 'horas' && valor !== '') {
-      const num = parseFloat(valor);
-      if (num > 24) {
-        showToast('Las horas al día no pueden ser mayores a 24', 'warning');
-        valor = 24;
-      } else if (num < 0) {
-        valor = 0;
-      }
-    }
-    if (campo === 'operadores' && valor !== '') {
-      const num = parseInt(valor, 10);
-      if (num < 0) valor = 0;
-    }
-
     setEquipos(prev => prev.map(eq => (eq.id === id ? { ...eq, [campo]: valor } : eq)));
-    setDirtyIds(prev => ({ ...prev, [id]: true }));
-  };
-
-  const toggleDiaLocal = (id, dia) => {
-    setEquipos(prev => prev.map(eq => {
-      if (eq.id !== id) return eq;
-      const diasActuales = Array.isArray(eq.dias) ? eq.dias : [];
-      const existe = diasActuales.includes(dia);
-      const nuevosDias = existe
-        ? diasActuales.filter(d => d !== dia)
-        : [...diasActuales, dia];
-      return { ...eq, dias: nuevosDias };
-    }));
     setDirtyIds(prev => ({ ...prev, [id]: true }));
   };
 
   const handleGuardarBorrador = async (equipo) => {
     setSavingId(equipo.id);
     try {
-      const actualizado = await dbService.guardarBorrador(userId, equipo);
+      const actualizado = await dbService.guardarBorrador(equipo);
       setEquipos(prev => prev.map(eq => (eq.id === equipo.id ? actualizado : eq)));
       setDirtyIds(prev => {
         const copia = { ...prev };
@@ -148,11 +123,11 @@ export default function MisEquipos() {
     }
   };
 
-  // Permite reabrir un equipo completado como borrador si el usuario desea corregir exposición y re-analizar
+  // Permite reabrir un equipo completado como borrador si el usuario desea corregir datos y re-analizar
   const handleReabrirComoBorrador = async (equipo) => {
     setSavingId(equipo.id);
     try {
-      const actualizado = await dbService.guardarBorrador(userId, equipo);
+      const actualizado = await dbService.reabrirComoBorrador(equipo.id);
       setEquipos(prev => prev.map(eq => (eq.id === equipo.id ? actualizado : eq)));
       showToast(`"${actualizado.equipo}" regresó a borrador para edición`, 'success');
     } catch (error) {
@@ -165,16 +140,12 @@ export default function MisEquipos() {
   const handleEliminar = async (id) => {
     if (!confirm('¿Estás seguro de eliminar este equipo permanentemente?')) return;
     try {
-      await dbService.eliminarEquipo(userId, id);
+      await dbService.eliminarEquipo(id);
       setEquipos(prev => prev.filter(eq => eq.id !== id));
       showToast('Equipo eliminado', 'success');
     } catch (error) {
       showToast(error.message, 'error');
     }
-  };
-
-  const handleCambiarFotos = (equipo) => {
-    navigate('/analisis-datos', { state: { equipoEditar: equipo } });
   };
 
   // --- LÓGICA UNITARIA DE ANÁLISIS PROFUNDO (WEBHOOK 2 · SOLO TEXTO) ---
@@ -186,10 +157,10 @@ export default function MisEquipos() {
       throw new Error('Falta capturar el Nombre del Equipo o la Descripción técnica.');
     }
 
-    // 1. Si tenía cambios locales en los inputs, primero los persistimos en Supabase
+    // 1. Si tenía cambios locales en los inputs, primero los persistimos
     let equipoSincronizado = equipoActual;
     if (dirtyIds[equipoActual.id]) {
-      equipoSincronizado = await dbService.guardarBorrador(userId, equipoActual);
+      equipoSincronizado = await dbService.guardarBorrador(equipoActual);
       setDirtyIds(prev => {
         const copia = { ...prev };
         delete copia[equipoActual.id];
@@ -197,29 +168,20 @@ export default function MisEquipos() {
       });
     }
 
-    // 2. Enviar ÚNICAMENTE TEXTO al Webhook 2 (sin imágenes)
+    // 2. Enviar ÚNICAMENTE TEXTO al Webhook 2 (sin imágenes ni campos de exposición)
     const payloadTexto = {
       user_id: userId,
       equipo_id: equipoSincronizado.id,
       equipo: nombre,
       identificacion: equipoSincronizado.identificacion || '',
       departamento: equipoSincronizado.departamento || '',
-      descripcion,
-      operadores:
-        equipoSincronizado.operadores === '' || equipoSincronizado.operadores === null
-          ? null
-          : Number(equipoSincronizado.operadores),
-      dias: Array.isArray(equipoSincronizado.dias) ? equipoSincronizado.dias : [],
-      horas:
-        equipoSincronizado.horas === '' || equipoSincronizado.horas === null
-          ? null
-          : Number(equipoSincronizado.horas)
+      descripcion
     };
 
     const { riesgos, matriz } = await analizarEquipoProfundo(payloadTexto);
 
-    // 3. Checkpoint inmediato en Supabase: cambia status a 'completado' y guarda riesgos + matriz
-    const completadoEnDb = await dbService.marcarCompletado(userId, equipoSincronizado.id, {
+    // 3. Checkpoint inmediato en Supabase: guarda en analisis_equipos y pasa a 'completado'
+    const completadoEnDb = await dbService.marcarCompletado(equipoSincronizado.id, {
       riesgos,
       matriz
     });
@@ -235,7 +197,6 @@ export default function MisEquipos() {
       return;
     }
 
-    // Validar cuáles están listos (tienen nombre y descripción) y cuáles no
     const listos = [];
     const incompletos = [];
 
@@ -267,7 +228,6 @@ export default function MisEquipos() {
 
     cancelQueueRef.current = false;
 
-    // Marcar los equipos listos como 'en cola'
     setItemStatus(prev => {
       const next = { ...prev };
       listos.forEach(eq => {
@@ -322,9 +282,6 @@ export default function MisEquipos() {
           }
         }));
 
-        // Si fue caída de internet o del servidor (Failed to fetch / SSL), detenemos la cola
-        // para no disparar fallos en cascada. Los equipos previos ya quedaron en 'completado'
-        // en Supabase, por lo que al reconectar se reanudará desde este equipo.
         if (error?.isNetworkError) {
           detenidoPorRed = true;
           break;
@@ -336,11 +293,11 @@ export default function MisEquipos() {
 
     if (detenidoPorRed) {
       showToast(
-        `Se completaron ${exitosos} de ${listos.length} equipo(s). La cola se pausó por fallo de conexión con n8n; presiona "Analizar Todos" para reanudar donde se quedó.`,
+        `Se completaron ${exitosos} de ${listos.length} equipo(s). La cola se pausó por fallo de conexión; presiona "Analizar Todos" para reanudar.`,
         'warning'
       );
     } else if (cancelQueueRef.current) {
-      showToast(`Cola pausada por el usuario (${exitosos} completado(s)).`, 'warning');
+      showToast(`Cola pausada (${exitosos} completado(s)).`, 'warning');
     } else if (fallidos > 0) {
       showToast(
         `Proceso finalizado: ${exitosos} completado(s) y ${fallidos} con observaciones.`,
@@ -439,251 +396,294 @@ export default function MisEquipos() {
         ? 'bg-amber-600'
         : 'bg-emerald-600';
 
+  // Estilos "glass" reutilizables (tomados de Analisisdatos.jsx)
+  const glassCard =
+    'rounded-3xl border border-white/60 bg-white/55 backdrop-blur-xl shadow-[0_8px_32px_rgba(0,32,96,0.08)]';
+  const glassInput =
+    'w-full rounded-xl border border-slate-200/80 bg-white/60 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 backdrop-blur transition outline-none focus:bg-white/90 focus:border-[#002060]/40 focus:ring-2 focus:ring-[#002060]/20 disabled:opacity-60';
+
   return (
-    <div className="p-6 max-w-6xl mx-auto font-body text-slate-800 space-y-10">
+    <div className="relative isolate overflow-hidden font-body text-slate-800">
 
-      {/* Toast de notificaciones */}
-      {toast.show && (
-        <div className={`fixed top-5 right-5 z-50 max-w-md px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${toastBgClass}`}>
-          {toast.type === 'error' || toast.type === 'warning' ? (
-            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-            </svg>
-          ) : (
-            <svg className="w-5 h-5 fill-current shrink-0" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-            </svg>
-          )}
-          <span>{toast.message}</span>
-        </div>
-      )}
+      {/* Fondo decorativo para superficies translúcidas */}
+      <div aria-hidden="true" className="absolute inset-0 -z-10 bg-linear-to-br from-slate-50 via-blue-50/70 to-indigo-100/60" />
+      <div aria-hidden="true" className="absolute -top-24 -left-24 -z-10 w-96 h-96 rounded-full bg-[#002060]/15 blur-3xl" />
+      <div aria-hidden="true" className="absolute top-1/3 -right-28 -z-10 w-[28rem] h-[28rem] rounded-full bg-sky-400/25 blur-3xl" />
+      <div aria-hidden="true" className="absolute bottom-0 left-1/4 -z-10 w-96 h-96 rounded-full bg-indigo-400/20 blur-3xl" />
 
-      {/* Modal de Generación de Word */}
-      {isGenerating && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border border-slate-100">
-            <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="font-title text-xl font-bold text-[#002060] mb-2">Generando Documento Word...</p>
-            <p className="text-sm text-slate-500">Consolidando tablas y análisis de riesgo...</p>
+      <div className="max-w-5xl mx-auto px-4 py-10">
+
+        {/* Toast de notificaciones */}
+        {toast.show && (
+          <div className={`fixed top-5 right-5 z-50 max-w-md px-6 py-4 rounded-xl shadow-2xl text-white font-bold transition-all flex items-center gap-3 ${toastBgClass}`}>
+            <Icon
+              className="w-5 h-5 shrink-0"
+              d={
+                toast.type === 'error' || toast.type === 'warning'
+                  ? 'M12 9v3.75m0 3.75h.008M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z'
+                  : 'M4.5 12.75l6 6 9-13.5'
+              }
+            />
+            <span>{toast.message}</span>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Encabezado Principal y Botones Maestros */}
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 border-b border-slate-200 pb-6">
-        <div>
-          <p className="text-xs font-bold uppercase tracking-widest text-[#003087] mb-1">
-            Fase 2 y 3 · Revisión Humana, Análisis en Lote y Reporte
-          </p>
-          <h1 className="text-3xl font-black text-[#002060] uppercase">
-            Mis Equipos ({equipos.length})
-          </h1>
-          <p className="text-slate-600 text-sm mt-1">
-            <span className="font-bold text-amber-700">{borradores.length} en borrador</span>
-            {' · '}
-            <span className="font-bold text-emerald-700">{completados.length} completado(s)</span>
-          </p>
-        </div>
+        {/* Modal de Generación de Word */}
+        {isGenerating && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-md z-50 flex items-center justify-center">
+            <div className="bg-white/80 backdrop-blur-xl p-8 rounded-3xl shadow-2xl text-center max-w-xs border border-white/60">
+              <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin mx-auto mb-4"></div>
+              <p className="font-title text-xl font-bold text-[#002060] mb-1">Generando Word...</p>
+              <p className="text-xs text-slate-500">Consolidando tablas y matrices NOM-004</p>
+            </div>
+          </div>
+        )}
 
-        <div className="flex flex-wrap gap-3 w-full lg:w-auto">
-          <Link
-            to="/analisis-datos"
-            className="bg-slate-200 hover:bg-slate-300 text-slate-800 px-4 py-2.5 rounded-xl font-bold transition flex items-center gap-2 text-sm"
-          >
-            <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-            </svg>
-            Agregar Equipo
-          </Link>
-
-          {borradores.length > 0 && (
-            <button
-              type="button"
-              onClick={handleAnalizarTodos}
-              disabled={queueProgress.running || isGenerating}
-              className="bg-[#002060] hover:bg-[#003087] disabled:bg-slate-400 text-white px-5 py-2.5 rounded-xl font-bold shadow-md transition flex items-center gap-2 text-sm"
-            >
-              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
-              </svg>
-              {queueProgress.running
-                ? `Analizando (${queueProgress.current}/${queueProgress.total})...`
-                : `Analizar Todos (${borradores.length})`}
-            </button>
-          )}
-
-          {completados.length > 0 && (
-            <button
-              type="button"
-              onClick={handleGenerarDocumento}
-              disabled={isGenerating || queueProgress.running}
-              className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg transition flex items-center gap-2 text-sm"
-            >
-              <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-              </svg>
-              Generar Reporte Word ({completados.length})
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Barra de progreso de la Cola Secuencial (Queue 1 a 1) */}
-      {queueProgress.running && (
-        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-5 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-4 w-full">
-            <div className="w-8 h-8 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin shrink-0"></div>
-            <div className="w-full">
-              <div className="flex justify-between text-xs font-bold text-[#002060] uppercase mb-1">
-                <span>Procesando cola secuencial (solo texto · Webhook 2)</span>
-                <span>{queueProgress.current} de {queueProgress.total}</span>
-              </div>
-              <p className="text-sm font-semibold text-slate-700 truncate mb-2">
-                Analizando: {queueProgress.currentName}
+        {/* Encabezado Principal estilo Glass (idéntico a Analisisdatos.jsx) */}
+        <header className="relative overflow-hidden rounded-3xl bg-[#002060]/90 backdrop-blur-xl text-white px-6 py-8 md:px-10 shadow-lg mb-8">
+          <div aria-hidden="true" className="absolute -right-10 -top-10 w-48 h-48 rounded-full bg-white/10 blur-2xl" />
+          <div className="relative flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+            <div>
+              <p className="text-blue-200 text-[11px] font-bold uppercase tracking-widest mb-1">
+                Fase 2 y 3 · Revisión y Reporte
               </p>
-              <div className="w-full bg-blue-100 h-2.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-[#002060] h-full transition-all duration-300"
-                  style={{ width: `${Math.round((queueProgress.current / queueProgress.total) * 100)}%` }}
-                />
-              </div>
+              <h1 className="font-title text-3xl md:text-4xl font-black uppercase tracking-wide">
+                Mis Equipos
+              </h1>
+              <p className="text-blue-100/80 text-sm mt-1">
+                {proyecto ? (
+                  <>
+                    Estudio: <span className="font-semibold text-white">{proyecto.titulo_proyecto}</span>
+                    {proyecto.razon_social ? ` · ${proyecto.razon_social}` : ''}
+                  </>
+                ) : (
+                  'Revisa tus borradores y genera el análisis NOM-004.'
+                )}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border bg-amber-400/20 border-amber-300/40 text-amber-100 backdrop-blur">
+                <span className="w-5 h-5 rounded-full bg-amber-400 text-[#002060] flex items-center justify-center text-[10px] font-black">
+                  {borradores.length}
+                </span>
+                Borradores
+              </span>
+
+              <span className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full text-xs font-bold border bg-emerald-400/20 border-emerald-300/40 text-emerald-100 backdrop-blur">
+                <span className="w-5 h-5 rounded-full bg-emerald-400 text-[#002060] flex items-center justify-center text-[10px] font-black">
+                  {completados.length}
+                </span>
+                Completados
+              </span>
+
+              {borradores.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleAnalizarTodos}
+                  disabled={queueProgress.running || isGenerating}
+                  className="flex items-center gap-2 px-4 py-2 rounded-full bg-white text-[#002060] hover:bg-blue-50 disabled:opacity-50 font-bold text-xs shadow-md transition cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <Icon className="w-4 h-4" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                  {queueProgress.running
+                    ? `${queueProgress.current}/${queueProgress.total}...`
+                    : 'Analizar todos'}
+                </button>
+              )}
+
+              {completados.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleGenerarDocumento}
+                  disabled={isGenerating || queueProgress.running}
+                  className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-400 text-[#002060] hover:bg-emerald-300 disabled:opacity-50 font-bold text-xs shadow-md transition cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <Icon className="w-4 h-4" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m.75 12l3 3m0 0l3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                  Exportar Word
+                </button>
+              )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handlePausarCola}
-            className="shrink-0 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs px-4 py-2 rounded-lg transition"
-          >
-            Pausar al terminar actual
-          </button>
-        </div>
-      )}
+        </header>
 
-      {isLoading ? (
-        <div className="flex items-center justify-center py-24">
-          <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin"></div>
-        </div>
-      ) : equipos.length === 0 ? (
-        <div className="bg-white border-2 border-dashed border-slate-300 rounded-2xl p-12 text-center text-slate-500">
-          <svg className="w-12 h-12 text-slate-400 fill-current mx-auto mb-3" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-          </svg>
-          <p className="font-bold text-slate-700 mb-1">Aún no tienes equipos registrados.</p>
-          <p className="text-sm">Sube las fotografías de un equipo en la Fase 1 para guardarlo aquí como borrador.</p>
-        </div>
-      ) : (
-        <div className="space-y-12">
-
-          {/* =====================================================================
-              SECCIÓN 1: EQUIPOS EN BORRADOR (TARJETAS EDITABLES · FASE 2)
-             ===================================================================== */}
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="font-title text-xl font-black text-[#002060] uppercase">
-                1. Equipos en Borrador · Revisión y Condiciones de Operación ({borradores.length})
-              </h2>
-            </div>
-
-            {borradores.length === 0 ? (
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center text-sm text-slate-500">
-                No tienes borradores pendientes. Todos tus equipos registrados ya fueron analizados.
+        {/* Barra de progreso de la Cola Secuencial (Queue 1 a 1) */}
+        {queueProgress.running && (
+          <div className={`${glassCard} mb-6 p-5 flex flex-col md:flex-row items-center justify-between gap-4`}>
+            <div className="flex items-center gap-4 w-full">
+              <div className="w-8 h-8 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin shrink-0"></div>
+              <div className="w-full">
+                <div className="flex justify-between text-xs font-bold text-[#002060] uppercase mb-1">
+                  <span>Analizando en cola secuencial</span>
+                  <span>{queueProgress.current} de {queueProgress.total}</span>
+                </div>
+                <p className="text-sm font-semibold text-slate-700 truncate mb-2">
+                  {queueProgress.currentName}
+                </p>
+                <div className="w-full bg-blue-100/80 h-2 rounded-full overflow-hidden">
+                  <div
+                    className="bg-linear-to-r from-[#002060] to-[#1d4ed8] h-full transition-all duration-300"
+                    style={{ width: `${Math.round((queueProgress.current / queueProgress.total) * 100)}%` }}
+                  />
+                </div>
               </div>
-            ) : (
-              <div className="grid gap-6">
-                {borradores.map((item) => {
-                  const fotos = Array.isArray(item.imagenes_urls) ? item.imagenes_urls : [];
-                  const diasSeleccionados = Array.isArray(item.dias) ? item.dias : [];
-                  const estadoCola = itemStatus[item.id];
-                  const estaAnalizandoEste = estadoCola?.state === 'analyzing';
-                  const tieneCambios = Boolean(dirtyIds[item.id]);
+            </div>
+            <button
+              type="button"
+              onClick={handlePausarCola}
+              className="shrink-0 px-4 py-2 rounded-xl border border-slate-300/80 bg-white/70 hover:bg-white text-slate-700 font-bold text-xs transition"
+            >
+              Pausar
+            </button>
+          </div>
+        )}
 
-                  return (
-                    <div
-                      key={item.id}
-                      className={`border-2 rounded-2xl p-6 bg-white shadow-sm transition space-y-6 ${
-                        estaAnalizandoEste
-                          ? 'border-blue-500 ring-2 ring-blue-100'
-                          : estadoCola?.state === 'error'
-                            ? 'border-red-300'
-                            : 'border-slate-200'
-                      }`}
-                    >
-                      {/* Cabecera de la tarjeta */}
-                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-100 pb-4">
-                        <div className="flex items-center gap-3 flex-wrap">
-                          <span className="text-xs px-2.5 py-1 rounded-md font-bold bg-amber-100 text-amber-800">
-                            Borrador
-                          </span>
-                          {tieneCambios && (
-                            <span className="text-xs px-2.5 py-1 rounded-md font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                              Cambios sin guardar
-                            </span>
-                          )}
-                          {estadoCola?.state === 'queued' && (
-                            <span className="text-xs px-2.5 py-1 rounded-md font-bold bg-slate-100 text-slate-600">
-                              En cola...
-                            </span>
-                          )}
-                          {estaAnalizandoEste && (
-                            <span className="text-xs px-2.5 py-1 rounded-md font-bold bg-blue-600 text-white flex items-center gap-1.5">
-                              <span className="w-2.5 h-2.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                              Analizando con IA...
-                            </span>
-                          )}
-                        </div>
+        {!fkEvaluacion ? (
+          <section className={`${glassCard} p-10 text-center`}>
+            <p className="font-title text-xl font-black text-[#002060] uppercase mb-1">No hay un estudio activo</p>
+            <p className="text-sm text-slate-600 mb-5">Entra a un estudio desde Datos Empresariales para ver sus equipos.</p>
+            <Link
+              to="/formulario"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#002060] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:bg-[#001040]"
+            >
+              Ir a Datos Empresariales
+            </Link>
+          </section>
+        ) : isLoading ? (
+          <div className="flex items-center justify-center py-24">
+            <div className="w-12 h-12 border-4 border-blue-200 border-t-[#002060] rounded-full animate-spin"></div>
+          </div>
+        ) : equipos.length === 0 ? (
+          <section className={`${glassCard} p-12 text-center text-slate-500`}>
+            <Icon className="w-12 h-12 text-slate-400 mx-auto mb-3" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316zM16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+            <p className="font-bold text-slate-700 mb-1">Aún no tienes equipos registrados</p>
+            <p className="text-sm mb-5">Registra el primer equipo en la Fase 1 para revisarlo aquí.</p>
+            <Link
+              to="/analisis-datos"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#002060] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:bg-[#001040]"
+            >
+              <Icon className="w-4 h-4" d="M12 4.5v15m7.5-7.5h-15" />
+              Registrar equipo
+            </Link>
+          </section>
+        ) : (
+          <div>
 
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleCambiarFotos(item)}
-                            disabled={queueProgress.running}
-                            className="text-xs font-bold text-slate-600 hover:text-[#002060] border border-slate-300 px-3 py-1.5 rounded-lg transition"
-                          >
-                            Cambiar fotos
-                          </button>
+            {/* =====================================================================
+                ZONA A · BORRADORES (Equipo a la izquierda/centro · Referencia a la derecha)
+               ===================================================================== */}
+            <div className="rounded-[2rem] border border-white/60 bg-white/25 backdrop-blur-sm p-4 md:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-4 px-1">
+                <div className="flex items-center gap-2.5">
+                  <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[#002060] bg-[#002060]/10 border border-[#002060]/15 px-3 py-1 rounded-full">
+                    <Icon className="w-3.5 h-3.5" strokeWidth={2.25} d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
+                    Borradores · {borradores.length}
+                  </span>
+                  <span className="text-xs text-slate-500">Revisa antes de analizar</span>
+                </div>
+              </div>
+
+              {borradores.length === 0 ? (
+                <div className={`${glassCard} p-6 text-center text-sm text-slate-500`}>
+                  No hay borradores pendientes. Todos tus equipos ya fueron analizados.
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {borradores.map((item, index) => {
+                    const fotos = Array.isArray(item.imagenes_urls) ? item.imagenes_urls : [];
+                    const estadoCola = itemStatus[item.id];
+                    const estaAnalizandoEste = estadoCola?.state === 'analyzing';
+                    const tieneCambios = Boolean(dirtyIds[item.id]);
+
+                    return (
+                      <article
+                        key={item.id}
+                        className={`${glassCard} p-5 md:p-6 transition ${
+                          estaAnalizandoEste
+                            ? 'ring-2 ring-blue-400/80'
+                            : estadoCola?.state === 'error'
+                              ? 'ring-2 ring-red-300/80'
+                              : ''
+                        }`}
+                      >
+                        {/* Barra superior minimalista */}
+                        <div className="flex items-center justify-between gap-3 mb-4">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[#002060] bg-[#002060]/10 px-2.5 py-1 rounded-full">
+                              Equipo #{index + 1}
+                            </span>
+                            {tieneCambios && (
+                              <span className="text-[11px] px-2.5 py-1 rounded-full font-semibold bg-amber-100/80 text-amber-800">
+                                Sin guardar
+                              </span>
+                            )}
+                            {estadoCola?.state === 'queued' && (
+                              <span className="text-[11px] px-2.5 py-1 rounded-full font-bold bg-slate-200/70 text-slate-700">
+                                En cola
+                              </span>
+                            )}
+                            {estaAnalizandoEste && (
+                              <span className="text-[11px] px-2.5 py-1 rounded-full font-bold bg-[#002060] text-white flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                Analizando...
+                              </span>
+                            )}
+                          </div>
+
                           <button
                             type="button"
                             onClick={() => handleEliminar(item.id)}
                             disabled={queueProgress.running}
-                            className="text-xs font-bold text-red-600 hover:bg-red-50 border border-red-200 px-3 py-1.5 rounded-lg transition"
+                            title="Eliminar equipo"
+                            aria-label="Eliminar equipo"
+                            className="inline-flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-red-600 hover:bg-red-50/70 px-2.5 py-1.5 rounded-xl transition disabled:opacity-50"
                           >
-                            Eliminar
+                            <Icon className="w-4 h-4" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                            <span className="hidden sm:inline">Eliminar</span>
                           </button>
                         </div>
-                      </div>
 
-                      {/* Aviso de error individual si falló en la cola */}
-                      {estadoCola?.state === 'error' && estadoCola.error && (
-                        <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-xs text-red-700 font-semibold">
-                          {estadoCola.error}
-                        </div>
-                      )}
+                        {/* Error individual si falló en la cola */}
+                        {estadoCola?.state === 'error' && estadoCola.error && (
+                          <div className="mb-4 px-4 py-3 rounded-2xl bg-red-100/60 border border-red-300/50 text-xs text-red-900 font-medium">
+                            {estadoCola.error}
+                          </div>
+                        )}
 
-                      {/* Cuerpo editable: Fotos + Identificación y Descripción */}
-                      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                        {/* Miniaturas de referencia */}
-                        <div className="lg:col-span-3 flex lg:flex-col gap-3">
-                          {fotos.length > 0 ? (
-                            fotos.map((url, idx) => (
-                              <img
-                                key={idx}
-                                src={url}
-                                alt={`Foto ${idx + 1}`}
-                                className="w-28 h-28 lg:w-full lg:h-32 object-cover rounded-xl border border-slate-200 bg-slate-100"
-                              />
-                            ))
-                          ) : (
-                            <div className="w-full h-32 rounded-xl border border-dashed border-slate-300 flex items-center justify-center text-xs text-slate-400">
-                              Sin fotos
-                            </div>
-                          )}
-                        </div>
+                        {/* Distribución en 3 columnas (igual de limpia que Analisisdatos):
+                            Izquierda: Fotos · Centro: Nombre y Descripción · Derecha: Identificación, Área y Acciones */}
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
 
-                        {/* Campos editables de Nombre, Tag, Departamento y Descripción */}
-                        <div className="lg:col-span-9 space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="md:col-span-1">
-                              <label className="block text-xs font-bold text-slate-700 mb-1">
+                          {/* 1. Fotos (Izquierda) */}
+                          <div className="lg:col-span-3 flex flex-col">
+                            <span className="block text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+                              Fotos ({fotos.length})
+                            </span>
+                            {fotos.length > 0 ? (
+                              <div className={`grid gap-2.5 flex-1 ${fotos.length > 1 ? 'grid-cols-2 lg:grid-cols-1' : 'grid-cols-1'}`}>
+                                {fotos.map((url, idx) => (
+                                  <div
+                                    key={idx}
+                                    className="relative rounded-2xl overflow-hidden border border-white/80 bg-slate-100/70 shadow-sm aspect-[4/3] lg:aspect-auto lg:min-h-[6.5rem]"
+                                  >
+                                    <img
+                                      src={url}
+                                      alt={`Foto ${idx + 1}`}
+                                      className="w-full h-full object-cover"
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="flex-1 min-h-[9rem] rounded-2xl border-2 border-dashed border-slate-300/80 bg-white/40 flex items-center justify-center text-xs text-slate-400">
+                                Sin fotos
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 2. Nombre y Descripción del Equipo (Centro) */}
+                          <div className="lg:col-span-5 flex flex-col gap-3.5">
+                            <div>
+                              <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide mb-1.5">
                                 Nombre del Equipo <span className="text-red-500">*</span>
                               </label>
                               <input
@@ -691,331 +691,356 @@ export default function MisEquipos() {
                                 value={item.equipo || ''}
                                 onChange={(e) => actualizarCampoLocal(item.id, 'equipo', e.target.value)}
                                 disabled={queueProgress.running}
-                                placeholder="Marca / Modelo / Tipo"
-                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
+                                placeholder="Marca y modelo · Ej. Torno Paralelo"
+                                className={`${glassInput} px-4`}
                               />
                             </div>
 
-                            <div>
-                              <label className="block text-xs font-bold text-slate-700 mb-1">
-                                Identificación / Tag
+                            <div className="flex-1 flex flex-col">
+                              <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide mb-1.5">
+                                Descripción técnica <span className="text-red-500">*</span>
                               </label>
-                              <input
-                                type="text"
-                                value={item.identificacion || ''}
-                                onChange={(e) => actualizarCampoLocal(item.id, 'identificacion', e.target.value)}
+                              <textarea
+                                rows={4}
+                                value={item.descripcion_manual || ''}
+                                onChange={(e) => actualizarCampoLocal(item.id, 'descripcion_manual', e.target.value)}
                                 disabled={queueProgress.running}
-                                placeholder="No. de inventario"
-                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-                              />
-                            </div>
-
-                            <div>
-                              <label className="block text-xs font-bold text-slate-700 mb-1">
-                                Departamento / Área
-                              </label>
-                              <input
-                                type="text"
-                                value={item.departamento || ''}
-                                onChange={(e) => actualizarCampoLocal(item.id, 'departamento', e.target.value)}
-                                disabled={queueProgress.running}
-                                placeholder="Ubicación física"
-                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
+                                placeholder="Funcionamiento, partes móviles, fuentes de energía..."
+                                className={`${glassInput} px-4 resize-none flex-1`}
                               />
                             </div>
                           </div>
 
-                          <div>
-                            <label className="block text-xs font-bold text-slate-700 mb-1">
-                              Descripción técnica del equipo <span className="text-red-500">*</span>
-                            </label>
-                            <textarea
-                              rows={3}
-                              value={item.descripcion_manual || ''}
-                              onChange={(e) => actualizarCampoLocal(item.id, 'descripcion_manual', e.target.value)}
-                              disabled={queueProgress.running}
-                              placeholder="Descripción técnica que se enviará en texto al análisis de riesgos NOM-004..."
-                              className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#002060] outline-none"
-                            />
-                          </div>
+                          {/* 3. Lado Derecho del Cuadro: Identificación, Área y Acciones */}
+                          <div className="lg:col-span-4 rounded-2xl border border-white/80 bg-white/45 backdrop-blur-md p-4 flex flex-col justify-between gap-4">
+                            <div className="space-y-3">
+                              <div className="flex items-center justify-between">
+                                <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-[#002060]">
+                                  <Icon className="w-4 h-4 text-[#002060]/70" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+                                  Referencia
+                                </span>
+                                <span className="text-[10px] font-semibold text-slate-400">opcional</span>
+                              </div>
 
-                          {/* Condiciones de Operación (Sin checkboxes de turnos) */}
-                          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                            <p className="text-xs font-extrabold uppercase text-[#002060] mb-3">
-                              Condiciones de Operación (Exposición)
-                            </p>
-                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
-                              <div className="md:col-span-3">
-                                <label className="block text-xs font-bold text-slate-700 mb-1">
-                                  No. Operadores
-                                </label>
+                              <div className="relative">
+                                <label className="sr-only">Identificación</label>
+                                <Icon className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
                                 <input
-                                  type="number"
-                                  min="0"
-                                  value={item.operadores ?? ''}
-                                  onChange={(e) => actualizarCampoLocal(item.id, 'operadores', e.target.value)}
+                                  type="text"
+                                  value={item.identificacion || ''}
+                                  onChange={(e) => actualizarCampoLocal(item.id, 'identificacion', e.target.value)}
                                   disabled={queueProgress.running}
-                                  placeholder="Ej. 2"
-                                  className="w-full p-2 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-[#002060] outline-none"
+                                  placeholder="Identificación"
+                                  className={`${glassInput} pl-10 pr-3`}
                                 />
                               </div>
 
-                              <div className="md:col-span-6">
-                                <label className="block text-xs font-bold text-slate-700 mb-1">
-                                  Días de operación
-                                </label>
-                                <div className="flex flex-wrap gap-1.5">
-                                  {DIAS_SEMANA.map((dia) => {
-                                    const activo = diasSeleccionados.includes(dia);
-                                    return (
-                                      <button
-                                        key={dia}
-                                        type="button"
-                                        disabled={queueProgress.running}
-                                        onClick={() => toggleDiaLocal(item.id, dia)}
-                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
-                                          activo
-                                            ? 'bg-[#002060] text-white border-[#002060]'
-                                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                                        }`}
-                                      >
-                                        {dia}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-
-                              <div className="md:col-span-3">
-                                <label className="block text-xs font-bold text-slate-700 mb-1">
-                                  Horas al día (Máx 24)
-                                </label>
+                              <div className="relative">
+                                <label className="sr-only">Área</label>
+                                <Icon className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
                                 <input
-                                  type="number"
-                                  min="0"
-                                  max="24"
-                                  step="0.5"
-                                  value={item.horas ?? ''}
-                                  onChange={(e) => actualizarCampoLocal(item.id, 'horas', e.target.value)}
+                                  type="text"
+                                  value={item.departamento || ''}
+                                  onChange={(e) => actualizarCampoLocal(item.id, 'departamento', e.target.value)}
                                   disabled={queueProgress.running}
-                                  placeholder="Ej. 8"
-                                  className="w-full p-2 text-sm border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-[#002060] outline-none"
+                                  placeholder="Área"
+                                  className={`${glassInput} pl-10 pr-3`}
                                 />
                               </div>
                             </div>
-                          </div>
 
-                          {/* Acciones de la tarjeta */}
-                          <div className="flex flex-wrap justify-end gap-3 pt-2">
-                            <button
-                              type="button"
-                              onClick={() => handleGuardarBorrador(item)}
-                              disabled={queueProgress.running || savingId === item.id}
-                              className="bg-white border-2 border-[#002060] text-[#002060] hover:bg-slate-50 disabled:opacity-50 font-bold text-xs px-4 py-2 rounded-xl transition"
-                            >
-                              {savingId === item.id ? 'Guardando...' : 'Guardar cambios'}
-                            </button>
+                            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60">
+                              <button
+                                type="button"
+                                onClick={() => handleGuardarBorrador(item)}
+                                disabled={queueProgress.running || savingId === item.id}
+                                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border border-[#002060]/25 bg-white/70 hover:bg-white text-[#002060] font-bold text-xs transition disabled:opacity-50"
+                              >
+                                <Icon className="w-4 h-4" d="M4.5 12.75l6 6 9-13.5" />
+                                {savingId === item.id ? 'Guardando...' : 'Guardar'}
+                              </button>
 
-                            <button
-                              type="button"
-                              onClick={() => handleAnalizarUno(item)}
-                              disabled={queueProgress.running || savingId === item.id}
-                              className="bg-[#003087] hover:bg-[#002060] disabled:bg-slate-300 text-white font-bold text-xs px-5 py-2 rounded-xl shadow-sm transition flex items-center gap-1.5"
-                            >
-                              <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20">
-                                <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.381z" clipRule="evenodd" />
-                              </svg>
-                              Analizar este equipo
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {/* =====================================================================
-              SECCIÓN 2: EQUIPOS COMPLETADOS (LISTOS PARA REPORTE WORD · FASE 3)
-             ===================================================================== */}
-          <section className="space-y-4">
-            <h2 className="font-title text-xl font-black text-[#002060] uppercase">
-              2. Equipos Completados · Listos para Reporte Word ({completados.length})
-            </h2>
-
-            {completados.length === 0 ? (
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center text-sm text-slate-500">
-                Aún no hay equipos con análisis profundo completado. Presiona <strong>Analizar Todos</strong> arriba cuando termines de revisar tus borradores.
-              </div>
-            ) : (
-              <div className="grid gap-4">
-                {completados.map((item) => {
-                  const miniatura = Array.isArray(item.imagenes_urls) ? item.imagenes_urls[0] : null;
-                  const matriz = Array.isArray(item.matriz) ? item.matriz : [];
-                  const riesgos = item.riesgos && typeof item.riesgos === 'object' ? item.riesgos : {};
-                  const abierto = expandedId === item.id;
-
-                  return (
-                    <div
-                      key={item.id}
-                      className="border border-emerald-200 rounded-2xl p-5 bg-white shadow-sm space-y-4"
-                    >
-                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                        <div className="flex items-start gap-4 min-w-0">
-                          {miniatura && (
-                            <img
-                              src={miniatura}
-                              alt={item.equipo || 'Equipo'}
-                              className="w-16 h-16 rounded-lg object-cover border border-slate-200 shrink-0"
-                            />
-                          )}
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="font-bold text-lg text-[#002060] truncate">
-                                {item.equipo || 'Sin Nombre'}
-                              </h3>
-                              <span className="text-xs px-2.5 py-0.5 rounded-md font-bold bg-emerald-100 text-emerald-800">
-                                Completado
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-600 mt-0.5">
-                              Dpto: <span className="font-semibold text-slate-800">{item.departamento || 'N/A'}</span>
-                              {' | '}
-                              Tag: <span className="font-semibold text-slate-800">{item.identificacion || 'N/A'}</span>
-                              {' | '}
-                              Operadores: <span className="font-semibold text-slate-800">{item.operadores ?? 'N/A'}</span>
-                              {' | '}
-                              Días: <span className="font-semibold text-slate-800">{(item.dias || []).join(', ') || 'N/A'}</span>
-                              {' | '}
-                              Horas/día: <span className="font-semibold text-slate-800">{item.horas ?? 'N/A'}</span>
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2 w-full md:w-auto justify-end">
-                          <button
-                            type="button"
-                            onClick={() => setExpandedId(abierto ? null : item.id)}
-                            className="bg-slate-100 hover:bg-slate-200 text-slate-800 px-3.5 py-2 rounded-lg font-bold text-xs transition"
-                          >
-                            {abierto ? 'Ocultar Matriz NOM-004' : `Ver Matriz NOM-004 (${matriz.length})`}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleReabrirComoBorrador(item)}
-                            disabled={queueProgress.running || savingId === item.id}
-                            className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 px-3.5 py-2 rounded-lg font-bold text-xs transition"
-                          >
-                            Editar en Borrador
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleEliminar(item.id)}
-                            disabled={queueProgress.running}
-                            className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-3.5 py-2 rounded-lg font-bold text-xs transition"
-                          >
-                            Eliminar
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Vista desplegable de Riesgos y Matriz NOM-004 */}
-                      {abierto && (
-                        <div className="pt-4 border-t border-slate-100 space-y-6">
-                          <div>
-                            <p className="text-xs font-extrabold uppercase text-[#002060] mb-2">
-                              Riesgos por Tipo Evaluados
-                            </p>
-                            <div className="overflow-x-auto rounded-lg border border-slate-200">
-                              <table className="w-full text-left border-collapse text-xs">
-                                <thead>
-                                  <tr className="bg-slate-100 text-slate-800 font-bold">
-                                    <th className="p-2.5">Riesgo Potencial</th>
-                                    <th className="p-2.5 w-24 text-center">Estado</th>
-                                    <th className="p-2.5">Observaciones / Medidas de Control</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-200">
-                                  {CATALOGO_RIESGOS.map(({ code, label }) => {
-                                    const r = riesgos[code] || {};
-                                    const presente = Boolean(r.presente);
-                                    return (
-                                      <tr key={code}>
-                                        <td className="p-2.5 font-semibold text-slate-800">{label}</td>
-                                        <td className="p-2.5 text-center">
-                                          <span className={`px-2 py-0.5 rounded font-bold ${
-                                            presente ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-600'
-                                          }`}>
-                                            {presente ? 'Presente' : 'Ausente'}
-                                          </span>
-                                        </td>
-                                        <td className="p-2.5 text-slate-600">
-                                          {r.observacion || (presente ? '-' : 'No aplica')}
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
+                              <button
+                                type="button"
+                                onClick={() => handleAnalizarUno(item)}
+                                disabled={queueProgress.running || savingId === item.id}
+                                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-linear-to-r from-[#002060] to-[#1d4ed8] text-white font-bold text-xs shadow-md shadow-[#002060]/20 hover:shadow-lg transition disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
+                              >
+                                <Icon className="w-4 h-4" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                                Analizar IA
+                              </button>
                             </div>
                           </div>
 
-                          <div>
-                            <p className="text-xs font-extrabold uppercase text-[#002060] mb-2">
-                              Matriz de Valoración NOM-004
-                            </p>
-                            <div className="overflow-x-auto rounded-lg border border-slate-300">
-                              <table className="w-full text-xs border-collapse text-center">
-                                <thead>
-                                  <tr className="bg-[#002060] text-white">
-                                    <th className="p-2 border border-slate-300">Riesgo</th>
-                                    <th className="p-2 border border-slate-300">Tipo de Daño</th>
-                                    <th className="p-2 border border-slate-300">Gravedad</th>
-                                    <th className="p-2 border border-slate-300">Probabilidad</th>
-                                    <th className="p-2 border border-slate-300">Valor</th>
-                                    <th className="p-2 border border-slate-300">Nivel</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {matriz.length > 0 ? (
-                                    matriz.map((row, idx) => (
-                                      <tr key={idx} className="border-t border-slate-200">
-                                        <td className="p-2 border border-slate-200 font-bold uppercase">{row.riesgo}</td>
-                                        <td className="p-2 border border-slate-200 text-left">{row.tipo_daño || row.tipo_danio}</td>
-                                        <td className="p-2 border border-slate-200 font-bold">{row.gravedad}</td>
-                                        <td className="p-2 border border-slate-200 font-bold">{row.probabilidad}</td>
-                                        <td className="p-2 border border-slate-200 font-extrabold">{row.valor}</td>
-                                        <td className={`p-2 border border-slate-200 ${getNivelBadgeClass(row.valor)}`}>
-                                          {row.nivel}
-                                        </td>
-                                      </tr>
-                                    ))
-                                  ) : (
-                                    <tr>
-                                      <td colSpan="6" className="p-3 text-slate-400 italic">
-                                        Sin riesgos presentes registrados en la matriz.
-                                      </td>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Separador sutil (como en Analisisdatos.jsx) */}
+            <div className="flex items-center gap-4 my-5 px-4" aria-hidden="true">
+              <span className="flex-1 h-px bg-linear-to-r from-transparent via-slate-300/70 to-slate-300/70" />
+              <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">NOM-004</span>
+              <span className="flex-1 h-px bg-linear-to-l from-transparent via-slate-300/70 to-slate-300/70" />
+            </div>
+
+            {/* =====================================================================
+                ZONA B · EQUIPOS COMPLETADOS (LISTOS PARA REPORTE WORD · FASE 3)
+               ===================================================================== */}
+            <div className="rounded-[2rem] border border-emerald-200/60 bg-emerald-100/20 backdrop-blur-sm p-4 md:p-5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-4 px-1">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-emerald-800 bg-emerald-100/80 border border-emerald-200/80 px-3 py-1 rounded-full">
+                  <Icon className="w-3.5 h-3.5" strokeWidth={2.5} d="M4.5 12.75l6 6 9-13.5" />
+                  Completados · {completados.length}
+                </span>
+                <span className="text-xs text-slate-500">Listos para exportar a Word</span>
+              </div>
+
+              {completados.length === 0 ? (
+                <div className={`${glassCard} p-6 text-center text-sm text-slate-500`}>
+                  Aún no hay equipos con análisis completo.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {completados.map((item) => {
+                    const miniatura = Array.isArray(item.imagenes_urls) ? item.imagenes_urls[0] : null;
+                    const matriz = Array.isArray(item.matriz) ? item.matriz : [];
+                    const riesgos = item.riesgos && typeof item.riesgos === 'object' ? item.riesgos : {};
+                    const abierto = expandedId === item.id;
+
+                    return (
+                      <article key={item.id} className={`${glassCard} p-5 space-y-4`}>
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+                          {/* Izquierda/Centro: Foto + Nombre y Descripción */}
+                          <div className="lg:col-span-7 flex items-center gap-4 min-w-0">
+                            {miniatura && (
+                              <img
+                                src={miniatura}
+                                alt={item.equipo || 'Equipo'}
+                                className="w-16 h-16 rounded-2xl object-cover border border-white/80 shadow-sm shrink-0"
+                              />
+                            )}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="font-bold text-base text-[#002060] truncate">
+                                  {item.equipo || 'Sin nombre'}
+                                </h3>
+                                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-100/80 text-emerald-800">
+                                  Completado
+                                </span>
+                              </div>
+                              {item.descripcion_manual && (
+                                <p className="text-xs text-slate-500 line-clamp-1 mt-1">
+                                  {item.descripcion_manual}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Lado Derecho: Identificación, Área y Acciones */}
+                          <div className="lg:col-span-5 flex flex-wrap items-center justify-between lg:justify-end gap-2">
+                            {(item.identificacion || item.departamento) && (
+                              <div className="flex flex-wrap items-center gap-1.5 mr-1">
+                                {item.identificacion && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 bg-white/70 border border-slate-200/80 px-2.5 py-1 rounded-xl">
+                                    <Icon className="w-3.5 h-3.5 text-slate-400" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3zM6 6h.008v.008H6V6z" />
+                                    {item.identificacion}
+                                  </span>
+                                )}
+                                {item.departamento && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 bg-white/70 border border-slate-200/80 px-2.5 py-1 rounded-xl">
+                                    <Icon className="w-3.5 h-3.5 text-slate-400" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0zM19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                                    {item.departamento}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setExpandedId(abierto ? null : item.id)}
+                                className="px-3.5 py-2 rounded-xl border border-slate-200/80 bg-white/70 hover:bg-white text-[#002060] font-bold text-xs transition"
+                              >
+                                {abierto ? 'Ocultar matriz' : `Matriz (${matriz.length})`}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleReabrirComoBorrador(item)}
+                                disabled={queueProgress.running || savingId === item.id}
+                                className="px-3 py-2 rounded-xl border border-amber-200/80 bg-amber-50/70 hover:bg-amber-100/80 text-amber-800 font-bold text-xs transition disabled:opacity-50"
+                              >
+                                Editar
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleEliminar(item.id)}
+                                disabled={queueProgress.running}
+                                title="Eliminar equipo"
+                                aria-label="Eliminar equipo"
+                                className="p-2 rounded-xl border border-red-200/70 bg-red-50/60 hover:bg-red-100/80 text-red-600 transition disabled:opacity-50"
+                              >
+                                <Icon className="w-4 h-4" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Vista desplegable de Riesgos y Matriz NOM-004 */}
+                        {abierto && (
+                          <div className="pt-4 border-t border-slate-200/60 space-y-5">
+                            <div>
+                              <p className="text-xs font-extrabold uppercase text-[#002060] mb-2">
+                                Riesgos por Tipo Evaluados
+                              </p>
+                              <div className="overflow-x-auto rounded-2xl border border-slate-200/80 bg-white/70">
+                                <table className="w-full text-left border-collapse text-xs">
+                                  <thead>
+                                    <tr className="bg-slate-100/80 text-slate-800 font-bold">
+                                      <th className="p-2.5">Riesgo Potencial</th>
+                                      <th className="p-2.5 w-24 text-center">Estado</th>
+                                      <th className="p-2.5">Observaciones / Medidas de Control</th>
                                     </tr>
-                                  )}
-                                </tbody>
-                              </table>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-200/70">
+                                    {CATALOGO_RIESGOS.map(({ code, label }) => {
+                                      const r = riesgos[code] || {};
+                                      const presente = Boolean(r.presente);
+                                      return (
+                                        <tr key={code}>
+                                          <td className="p-2.5 font-semibold text-slate-800">{label}</td>
+                                          <td className="p-2.5 text-center">
+                                            <span className={`px-2 py-0.5 rounded-full font-bold ${
+                                              presente ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-600'
+                                            }`}>
+                                              {presente ? 'Presente' : 'Ausente'}
+                                            </span>
+                                          </td>
+                                          <td className="p-2.5 text-slate-600">
+                                            {r.observacion || (presente ? '-' : 'No aplica')}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            <div>
+                              <p className="text-xs font-extrabold uppercase text-[#002060] mb-2">
+                                Matriz de Valoración NOM-004
+                              </p>
+                              <div className="overflow-x-auto rounded-2xl border border-slate-200/80 bg-white/70">
+                                <table className="w-full text-xs border-collapse text-center">
+                                  <thead>
+                                    <tr className="bg-[#002060] text-white">
+                                      <th className="p-2.5">Riesgo</th>
+                                      <th className="p-2.5">Tipo de Daño</th>
+                                      <th className="p-2.5">Gravedad</th>
+                                      <th className="p-2.5">Probabilidad</th>
+                                      <th className="p-2.5">Valor</th>
+                                      <th className="p-2.5">Nivel</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-200/70">
+                                    {matriz.length > 0 ? (
+                                      matriz.map((row, idx) => (
+                                        <tr key={idx}>
+                                          <td className="p-2.5 font-bold uppercase">{row.riesgo}</td>
+                                          <td className="p-2.5 text-left">{row.tipo_daño || row.tipo_danio}</td>
+                                          <td className="p-2.5 font-bold">{row.gravedad}</td>
+                                          <td className="p-2.5 font-bold">{row.probabilidad}</td>
+                                          <td className="p-2.5 font-extrabold">{row.valor}</td>
+                                          <td className={`p-2.5 ${getNivelBadgeClass(row.valor)}`}>
+                                            {row.nivel}
+                                          </td>
+                                        </tr>
+                                      ))
+                                    ) : (
+                                      <tr>
+                                        <td colSpan="6" className="p-3 text-slate-400 italic">
+                                          Sin riesgos presentes registrados en la matriz.
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
-        </div>
-      )}
+          </div>
+        )}
+
+        {/* Pie de navegación idéntico a Analisisdatos.jsx */}
+        <footer className="mt-8 flex flex-col-reverse md:flex-row md:items-center md:justify-between gap-3">
+          <Link
+            to="/analisis-datos"
+            className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl border border-white/70 bg-white/50 backdrop-blur text-slate-700 font-bold transition hover:bg-white/90"
+          >
+            <Icon className="w-5 h-5" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+            Registrar equipo
+          </Link>
+
+          <div className="flex flex-col md:flex-row gap-3">
+            {borradores.length > 0 && (
+              <button
+                type="button"
+                onClick={handleAnalizarTodos}
+                disabled={queueProgress.running || isGenerating}
+                className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-[#002060] text-white font-bold shadow-lg shadow-[#002060]/25 transition hover:bg-[#001040] hover:-translate-y-0.5 disabled:opacity-50"
+              >
+                <Icon className="w-5 h-5" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                Analizar todos ({borradores.length})
+              </button>
+            )}
+
+            {completados.length > 0 && (
+              <button
+                type="button"
+                onClick={handleGenerarDocumento}
+                disabled={isGenerating || queueProgress.running}
+                className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-emerald-600 text-white font-bold shadow-lg shadow-emerald-900/20 transition hover:bg-emerald-700 hover:-translate-y-0.5 disabled:opacity-50"
+              >
+                <Icon className="w-5 h-5" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m.75 12l3 3m0 0l3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                Exportar Word ({completados.length})
+              </button>
+            )}
+          </div>
+        </footer>
+
+      </div>
     </div>
+  );
+}
+
+// Ícono de trazo (estilo Heroicons outline)
+function Icon({ d, className = 'w-5 h-5', strokeWidth = 1.75 }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path d={d} />
+    </svg>
   );
 }

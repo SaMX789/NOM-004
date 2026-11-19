@@ -114,7 +114,7 @@ export async function preAnalizarEquipo(datos) {
 
 /**
  * WEBHOOK 2 · FASE 2: Análisis profundo en texto (1 solo equipo a la vez, sin imágenes).
- * Recibe la descripción revisada y las condiciones de operación (operadores, días, horas al día).
+ * Recibe el nombre, descripción técnica y referencias opcionales (identificación y área).
  * Devuelve { riesgos, matriz } conforme a la NOM-004-STPS-1999.
  * @param {{
  *   user_id: string,
@@ -122,17 +122,14 @@ export async function preAnalizarEquipo(datos) {
  *   equipo: string,
  *   identificacion?: string,
  *   departamento?: string,
- *   descripcion: string,
- *   operadores: number|null,
- *   dias: string[],
- *   horas: number|null
- * }} datosExposicion
+ *   descripcion: string
+ * }} datosEquipo
  * @returns {Promise<{ riesgos: object, matriz: object[] }>}
  */
-export async function analizarEquipoProfundo(datosExposicion) {
+export async function analizarEquipoProfundo(datosEquipo) {
   const respuesta = await postJsonWebhook(
     DEEP_ANALYSIS_URL,
-    { ...datosExposicion, tipo_analisis: TIPO_ANALISIS.PROFUNDO },
+    { ...datosEquipo, tipo_analisis: TIPO_ANALISIS.PROFUNDO },
     'Análisis Profundo (Fase 2)'
   );
 

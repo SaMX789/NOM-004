@@ -1,137 +1,132 @@
 import { supabase } from './supabaseClient';
+import {
+  eliminarArchivos,
+  eliminarMetaOpcional,
+  guardarMetaOpcional,
+  obtenerMetaOpcional
+} from './equiposService';
 
-const TABLA = 'equipos';
+/**
+ * Lectura/edición de equipos sobre el esquema definitivo (src/services/sqlspb.txt):
+ *   equipos · equipos_imagenes · analisis_equipos
+ *
+ * Expone cada equipo con la forma que consume "Mis Equipos":
+ *   { id, equipo, descripcion_manual, identificacion, departamento, imagenes_urls, status, riesgos, matriz }
+ *   - status 'completado' <=> existe un registro en analisis_equipos para ese equipo.
+ *   - riesgos / matriz viven en analisis_equipos.analysis (JSONB: { riesgos, matriz }).
+ */
 
 export const EQUIPO_STATUS = {
   BORRADOR: 'borrador',
   COMPLETADO: 'completado'
 };
 
-// Campos que el usuario puede capturar/editar mientras el equipo está en borrador
-// (Fase 1: datos de la IA · Fase 2: condiciones de operación)
-const CAMPOS_EDITABLES = [
-  'equipo',
-  'descripcion_manual',
-  'identificacion',
-  'departamento',
-  'imagenes_urls',
-  'operadores',
-  'dias',
-  'horas'
-];
-
-const CAMPOS_NUMERICOS = ['operadores', 'horas'];
-
-const requerirUsuario = (userId) => {
-  if (!userId) throw new Error('Tu sesión no es válida. Vuelve a iniciar sesión.');
-};
+const SELECT_EQUIPO = '*, equipos_imagenes(*), analisis_equipos(*)';
 
 const aError = (error, accion) => {
   console.error(`Supabase · error al ${accion}:`, error);
   return new Error(`No se pudo ${accion}: ${error.message}`, { cause: error });
 };
 
-// Toma solo los campos permitidos y convierte '' -> null en los numéricos
-const normalizar = (datos) => {
-  const limpio = {};
-  for (const campo of CAMPOS_EDITABLES) {
-    if (datos[campo] === undefined) continue;
-    let valor = datos[campo];
-    if (CAMPOS_NUMERICOS.includes(campo)) {
-      valor = valor === '' || valor === null ? null : Number(valor);
-    }
-    limpio[campo] = valor;
-  }
-  return limpio;
+const porFecha = (campo, direccion) => (a, b) =>
+  direccion * (new Date(a[campo]).getTime() - new Date(b[campo]).getTime());
+
+// Convierte una fila de `equipos` (con relaciones) a la forma que usa la UI
+const adaptar = (fila) => {
+  const imagenes = [...(fila.equipos_imagenes ?? [])].sort(porFecha('created_at', 1));
+  const ultimoAnalisis = [...(fila.analisis_equipos ?? [])].sort(porFecha('created_at', -1))[0];
+  const metaOpcional = obtenerMetaOpcional(fila.id);
+
+  return {
+    id: fila.id,
+    fk_evaluacion: fila.fk_evaluacion,
+    equipo: fila.nombre_equipo ?? '',
+    descripcion_manual: fila.descripcion_equipo ?? '',
+    identificacion: metaOpcional.identificacion,
+    departamento: metaOpcional.departamento,
+    imagenes,
+    imagenes_urls: imagenes.map((img) => img.url_publica),
+    status: ultimoAnalisis ? EQUIPO_STATUS.COMPLETADO : EQUIPO_STATUS.BORRADOR,
+    riesgos: ultimoAnalisis?.analysis?.riesgos ?? null,
+    matriz: ultimoAnalisis?.analysis?.matriz ?? null,
+    created_at: fila.fecha_insercion
+  };
+};
+
+const obtenerAdaptado = async (id) => {
+  const { data, error } = await supabase.from('equipos').select(SELECT_EQUIPO).eq('id', id).single();
+  if (error) throw aError(error, 'obtener el equipo');
+  return adaptar(data);
 };
 
 export const dbService = {
-  /**
-   * Lista los equipos del usuario. Opcionalmente filtra por status.
-   * @param {string} userId
-   * @param {{ status?: 'borrador' | 'completado' }} [opciones]
-   */
-  async obtenerTodos(userId, { status } = {}) {
-    requerirUsuario(userId);
-    let query = supabase
-      .from(TABLA)
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: true });
+  /** Lista los equipos de una evaluación (estudio), del más antiguo al más reciente. */
+  async obtenerPorEvaluacion(fkEvaluacion) {
+    if (!fkEvaluacion) throw new Error('No hay un estudio activo seleccionado.');
 
-    if (status) query = query.eq('status', status);
-
-    const { data, error } = await query;
-    if (error) throw aError(error, 'obtener los equipos');
-    return data ?? [];
-  },
-
-  async obtenerPorId(userId, id) {
-    requerirUsuario(userId);
     const { data, error } = await supabase
-      .from(TABLA)
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (error) throw aError(error, 'obtener el equipo');
-    return data;
+      .from('equipos')
+      .select(SELECT_EQUIPO)
+      .eq('fk_evaluacion', fkEvaluacion)
+      .order('fecha_insercion', { ascending: true });
+    if (error) throw aError(error, 'obtener los equipos');
+
+    return (data ?? []).map(adaptar);
   },
 
   /**
-   * Crea o actualiza un equipo y lo deja en status 'borrador'.
-   * Cualquier cambio en los datos de entrada invalida un análisis previo,
-   * por eso un equipo 'completado' que se edita vuelve a 'borrador'.
-   * Los campos no enviados (riesgos, matriz, etc.) se conservan.
+   * Guarda la edición manual de nombre, descripción, identificación (opcional) y área (opcional).
    */
-  async guardarBorrador(userId, { id, ...datos }) {
-    requerirUsuario(userId);
-    const registro = { ...normalizar(datos), status: EQUIPO_STATUS.BORRADOR };
+  async guardarBorrador(equipoLocal) {
+    const { error } = await supabase
+      .from('equipos')
+      .update({
+        nombre_equipo: (equipoLocal.equipo ?? '').trim(),
+        descripcion_equipo: (equipoLocal.descripcion_manual ?? '').trim()
+      })
+      .eq('id', equipoLocal.id);
+    if (error) throw aError(error, 'actualizar el equipo');
 
-    if (id) {
-      const { data, error } = await supabase
-        .from(TABLA)
-        .update(registro)
-        .eq('id', id)
-        .eq('user_id', userId)
-        .select()
-        .single();
-      if (error) throw aError(error, 'actualizar el borrador');
-      return data;
+    guardarMetaOpcional(equipoLocal.id, {
+      identificacion: equipoLocal.identificacion,
+      departamento: equipoLocal.departamento
+    });
+
+    return obtenerAdaptado(equipoLocal.id);
+  },
+
+  /** Guarda el análisis profundo en `analisis_equipos` (reemplaza uno previo del mismo equipo). */
+  async marcarCompletado(id, { riesgos, matriz }) {
+    const { error: errorBorrado } = await supabase.from('analisis_equipos').delete().eq('fk_equipo', id);
+    if (errorBorrado) throw aError(errorBorrado, 'reemplazar el análisis anterior');
+
+    const { error } = await supabase
+      .from('analisis_equipos')
+      .insert({ fk_equipo: id, analysis: { riesgos, matriz } });
+    if (error) throw aError(error, 'guardar el análisis del equipo');
+
+    return obtenerAdaptado(id);
+  },
+
+  /** Descarta el análisis para que el equipo vuelva a ser un borrador editable. */
+  async reabrirComoBorrador(id) {
+    const { error } = await supabase.from('analisis_equipos').delete().eq('fk_equipo', id);
+    if (error) throw aError(error, 'reabrir el equipo como borrador');
+
+    return obtenerAdaptado(id);
+  },
+
+  /** Elimina el equipo (CASCADE borra imágenes y análisis) y sus archivos del bucket. */
+  async eliminarEquipo(id) {
+    const { data: imagenes } = await supabase.from('equipos_imagenes').select('file_id').eq('fk_equipo', id);
+
+    const { data: borrados, error } = await supabase.from('equipos').delete().eq('id', id).select('id');
+    if (error) throw aError(error, 'eliminar el equipo');
+    if (!borrados || borrados.length === 0) {
+      throw new Error('No se pudo eliminar el equipo (no existe o no tienes permisos).');
     }
 
-    const { data, error } = await supabase
-      .from(TABLA)
-      .insert({ ...registro, user_id: userId })
-      .select()
-      .single();
-    if (error) throw aError(error, 'guardar el borrador');
-    return data;
-  },
-
-  /**
-   * Fase 2: guarda el resultado del análisis profundo y marca el equipo como 'completado'.
-   */
-  async marcarCompletado(userId, id, { riesgos, matriz }) {
-    requerirUsuario(userId);
-    const { data, error } = await supabase
-      .from(TABLA)
-      .update({ riesgos, matriz, status: EQUIPO_STATUS.COMPLETADO })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .select()
-      .single();
-    if (error) throw aError(error, 'guardar el análisis del equipo');
-    return data;
-  },
-
-  async eliminarEquipo(userId, id) {
-    requerirUsuario(userId);
-    const { error } = await supabase
-      .from(TABLA)
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId);
-    if (error) throw aError(error, 'eliminar el equipo');
+    eliminarMetaOpcional(id);
+    await eliminarArchivos((imagenes ?? []).map((img) => img.file_id));
   }
 };

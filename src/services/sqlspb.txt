@@ -1,0 +1,102 @@
+-- ====================================================================
+-- ASCI-NOM-004: ESQUEMA DEFINITIVO (Supabase / PostgreSQL)
+-- ====================================================================
+
+-- 1. CLIENTES
+CREATE TABLE clientes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL, -- Clave para proteger los datos con RLS en Supabase
+    logo_url TEXT,
+    razon_social TEXT NOT NULL,
+    domicilio TEXT NOT NULL,
+    rfc VARCHAR(20) NOT NULL UNIQUE,
+    rama_industrial TEXT NOT NULL,
+    num_trabajadores INTEGER NOT NULL CHECK (num_trabajadores >= 0),
+    turnos_horarios TEXT NOT NULL,
+    elaborado_por TEXT,
+    especialista_ing TEXT NOT NULL,
+    registro_stps VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_clientes_user_id ON clientes(user_id);
+
+-- 2. EVALUACIONES NOM-004
+CREATE TABLE evaluaciones_norma04 (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_cliente UUID NOT NULL REFERENCES clientes(id) ON DELETE RESTRICT,
+    titulo_proyecto TEXT NOT NULL,
+    estado VARCHAR(30) DEFAULT 'En Borrador' 
+        CHECK (estado IN ('En Borrador', 'Analizando', 'Completado')),
+    estudio_json JSONB, -- Ideal para guardar el payload final consolidado
+    fecha_creacion TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_evaluaciones_cliente ON evaluaciones_norma04(fk_cliente);
+
+-- 3. EQUIPOS
+CREATE TABLE equipos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_evaluacion UUID NOT NULL REFERENCES evaluaciones_norma04(id) ON DELETE CASCADE,
+    nombre_equipo TEXT,
+    descripcion_equipo TEXT,
+    identificador_imagen VARCHAR(255) NOT NULL,
+    fecha_insercion TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_equipos_evaluacion ON equipos(fk_evaluacion);
+
+-- 4. IMÁGENES DE LOS EQUIPOS
+CREATE TABLE equipos_imagenes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_equipo UUID NOT NULL REFERENCES equipos(id) ON DELETE CASCADE,
+    nombre_archivo TEXT NOT NULL,
+    url_publica TEXT NOT NULL, -- Preparado para Supabase Storage / Cloudflare R2
+    file_id TEXT, 
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_imagenes_equipo ON equipos_imagenes(fk_equipo);
+
+-- 5. ANÁLISIS DE EQUIPOS (Resultados de la IA)
+CREATE TABLE analisis_equipos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_equipo UUID NOT NULL REFERENCES equipos(id) ON DELETE CASCADE,
+    analysis JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_analisis_equipo ON analisis_equipos(fk_equipo);
+
+-- 6. HISTORIAL DE SINCRONIZACIONES (Control maestro de n8n)
+CREATE TABLE historial_sincronizaciones (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_evaluacion UUID NOT NULL REFERENCES evaluaciones_norma04(id) ON DELETE CASCADE,
+    nombre_lote TEXT,
+    estado VARCHAR(20) NOT NULL DEFAULT 'iniciado' 
+        CHECK (estado IN ('iniciado', 'procesando', 'completado', 'error')),
+    total_archivos INTEGER NOT NULL DEFAULT 0 CHECK (total_archivos >= 0),
+    archivos_procesados INTEGER NOT NULL DEFAULT 0 CHECK (archivos_procesados >= 0),
+    detalles_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fecha_finalizacion TIMESTAMPTZ,
+    CHECK (archivos_procesados <= total_archivos)
+);
+CREATE INDEX idx_sincronizaciones_evaluacion ON historial_sincronizaciones(fk_evaluacion);
+CREATE INDEX idx_sincronizaciones_estado ON historial_sincronizaciones(estado);
+
+-- 7. ARCHIVOS DE SINCRONIZACIÓN (Control granular por imagen procesada)
+CREATE TABLE archivos_sincronizacion (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fk_sincronizacion UUID NOT NULL REFERENCES historial_sincronizaciones(id) ON DELETE CASCADE,
+    nombre_archivo TEXT NOT NULL,
+    estado VARCHAR(20) NOT NULL DEFAULT 'pendiente' 
+        CHECK (estado IN ('pendiente', 'procesando', 'completado', 'error')),
+    fk_imagen UUID REFERENCES equipos_imagenes(id) ON DELETE SET NULL,
+    detalles_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_archivos_sync ON archivos_sincronizacion(fk_sincronizacion);
+CREATE INDEX idx_archivos_sync_estado ON archivos_sincronizacion(estado);
+
+ALTER TABLE equipos
+ADD COLUMN identificacion VARCHAR(100) NULL,
+ADD COLUMN area VARCHAR(150) NULL;
